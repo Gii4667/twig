@@ -1,10 +1,32 @@
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use super::GlobalConfig;
+
+/// Regex patterns for git URL parsing
+static GIT_URL_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
+        // HTTPS: https://github.com/user/repo.git or https://github.com/user/repo
+        Regex::new(r"^https?://[^/]+/(?:.+/)?([^/]+?)(?:\.git)?$").unwrap(),
+        // SSH: git@github.com:user/repo.git or git@github.com:user/repo
+        Regex::new(r"^git@[^:]+:(?:.+/)?([^/]+?)(?:\.git)?$").unwrap(),
+        // SSH with protocol: ssh://git@github.com/user/repo.git
+        Regex::new(r"^ssh://[^/]+/(?:.+/)?([^/]+?)(?:\.git)?$").unwrap(),
+    ]
+});
+
+/// Regex to validate git URLs
+static GIT_URL_VALIDATOR: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^(?:https?://[^/]+/[^/]+/[^/]+(?:\.git)?|git@[^:]+:[^/]+/[^/]+(?:\.git)?|ssh://[^/]+/[^/]+/[^/]+(?:\.git)?)$"
+    ).unwrap()
+});
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Project {
@@ -13,6 +35,9 @@ pub struct Project {
 
     /// Root directory for the project
     pub root: String,
+
+    /// Git repository URL (https or ssh) - optional
+    pub repo: Option<String>,
 
     /// Windows configuration
     #[serde(default)]
@@ -133,6 +158,72 @@ impl Project {
         }
         Ok(())
     }
+
+    /// Clone the repository if root doesn't exist and repo URL is configured
+    pub fn clone_if_needed(&self) -> Result<()> {
+        let root = self.root_expanded();
+
+        if root.exists() {
+            return Ok(());
+        }
+
+        let repo_url = match &self.repo {
+            Some(url) => url,
+            None => anyhow::bail!(
+                "Project root does not exist: {:?}\nAdd a 'repo' field to clone automatically.",
+                root
+            ),
+        };
+
+        println!("Cloning {} into {:?}...", repo_url, root);
+
+        // Ensure parent directory exists
+        if let Some(parent) = root.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+        }
+
+        let status = Command::new("git")
+            .args(["clone", repo_url, &root.to_string_lossy()])
+            .status()
+            .context("Failed to run git clone")?;
+
+        if !status.success() {
+            anyhow::bail!("git clone failed for {}", repo_url);
+        }
+
+        println!("Cloned successfully.");
+        Ok(())
+    }
+
+    /// Extract project name from a git URL
+    /// Supports:
+    ///   - https://github.com/user/repo.git
+    ///   - https://github.com/user/repo
+    ///   - git@github.com:user/repo.git
+    ///   - git@github.com:user/repo
+    ///   - ssh://git@github.com/user/repo.git
+    pub fn name_from_repo_url(url: &str) -> Option<String> {
+        let url = url.trim();
+
+        for pattern in GIT_URL_PATTERNS.iter() {
+            if let Some(captures) = pattern.captures(url) {
+                if let Some(name) = captures.get(1) {
+                    let name = name.as_str().to_string();
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Validate if a string is a valid git URL
+    pub fn is_git_url(s: &str) -> bool {
+        GIT_URL_VALIDATOR.is_match(s.trim())
+    }
 }
 
 impl Window {
@@ -185,5 +276,71 @@ impl Pane {
             Pane::Command(cmd) => Some(cmd),
             Pane::Empty => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_name_from_https_url() {
+        assert_eq!(
+            Project::name_from_repo_url("https://github.com/user/myrepo.git"),
+            Some("myrepo".to_string())
+        );
+        assert_eq!(
+            Project::name_from_repo_url("https://github.com/user/myrepo"),
+            Some("myrepo".to_string())
+        );
+        assert_eq!(
+            Project::name_from_repo_url("https://gitlab.com/org/subgroup/repo.git"),
+            Some("repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_name_from_ssh_url() {
+        assert_eq!(
+            Project::name_from_repo_url("git@github.com:user/myrepo.git"),
+            Some("myrepo".to_string())
+        );
+        assert_eq!(
+            Project::name_from_repo_url("git@github.com:user/myrepo"),
+            Some("myrepo".to_string())
+        );
+        assert_eq!(
+            Project::name_from_repo_url("git@gitlab.com:org/subgroup/repo.git"),
+            Some("repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_name_from_ssh_protocol_url() {
+        assert_eq!(
+            Project::name_from_repo_url("ssh://git@github.com/user/myrepo.git"),
+            Some("myrepo".to_string())
+        );
+        assert_eq!(
+            Project::name_from_repo_url("ssh://git@github.com/user/myrepo"),
+            Some("myrepo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_is_git_url_valid() {
+        assert!(Project::is_git_url("https://github.com/user/repo.git"));
+        assert!(Project::is_git_url("https://github.com/user/repo"));
+        assert!(Project::is_git_url("git@github.com:user/repo.git"));
+        assert!(Project::is_git_url("git@github.com:user/repo"));
+        assert!(Project::is_git_url("ssh://git@github.com/user/repo.git"));
+    }
+
+    #[test]
+    fn test_is_git_url_invalid() {
+        assert!(!Project::is_git_url("myproject"));
+        assert!(!Project::is_git_url("some-name"));
+        assert!(!Project::is_git_url("https://example.com"));
+        assert!(!Project::is_git_url(""));
     }
 }

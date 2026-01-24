@@ -19,11 +19,8 @@ pub fn run(project_name: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    // Verify project root exists
-    let root = project.root_expanded();
-    if !root.exists() {
-        anyhow::bail!("Project root does not exist: {:?}", root);
-    }
+    // Clone repo if root doesn't exist
+    project.clone_if_needed()?;
 
     // Create the session
     println!("Starting session '{}'...", project.name);

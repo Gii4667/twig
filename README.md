@@ -43,7 +43,7 @@ ln -s ~/Work/twig/target/release/twig ~/.local/bin/twig
 ```bash
 twig start [project]     # Start/attach to session (interactive if no arg)
 twig list                # List all projects
-twig new [name]          # Create new project interactively
+twig new [name|repo_url] # Create new project (accepts name or git URL)
 twig edit [project]      # Open config in $EDITOR
 twig delete [project]    # Delete project config
 twig stop [project]      # Kill tmux session
@@ -52,6 +52,11 @@ twig stop [project]      # Kill tmux session
 twig worktree create [project] [branch]   # Create worktree + session
 twig worktree list [project]              # List worktrees
 twig worktree delete [project] [branch]   # Delete worktree + kill session
+```
+
+When creating a project with a git URL, twig extracts the project name automatically:
+```bash
+twig new git@github.com:user/myproject.git  # Creates project "myproject"
 ```
 
 Aliases: `ls` for `list`, `s` for `start`, `n` for `new`, `e` for `edit`, `rm` for `delete`, `wt` for `worktree`
@@ -78,6 +83,10 @@ Location: `~/.config/twig/projects/<name>.yml`
 ```yaml
 name: myproject
 root: ~/Work/myproject
+
+# Optional: git repo URL (https or ssh)
+# If root doesn't exist, twig will clone this repo on first start
+repo: git@github.com:user/myproject.git
 
 windows:
   # Simple window with command

@@ -14,19 +14,20 @@ Built to scratch my own itch. Uses [Charmbracelet](https://charm.sh/) tools like
 
 ## Installation
 
-We recommend using [mise](https://mise.jdx.dev/) to install all dependencies:
+We recommend using [mise](https://mise.jdx.dev/) to install dependencies.
+
+### From source
 
 ```bash
-cd ~/.dotfiles/twig
+git clone https://github.com/andersonkrs/twig.git ~/Work/twig
+cd ~/Work/twig
 
 # Install all tools (rust, gum, lefthook) + git hooks
 mise install
 
-# Build
+# Build and install globally
 cargo build --release
-
-# Symlink to PATH
-ln -s ~/.dotfiles/twig/target/release/twig ~/.local/bin/twig
+mise use -g twig@path:~/Work/twig/target/release
 ```
 
 ## Usage
@@ -186,15 +187,11 @@ When you run `twig worktree delete <project> <branch>`:
 # Install dependencies + git hooks
 mise install
 
-# Format
-cargo fmt
-
-# Lint
-cargo clippy --all-targets --all-features -- -D warnings
-
 # Build
 cargo build --release
 ```
+
+Formatting and linting are automatically run by lefthook on pre-commit.
 
 ## License
 

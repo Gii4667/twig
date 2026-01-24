@@ -49,9 +49,9 @@ twig delete [project]    # Delete project config
 twig stop [project]      # Kill tmux session
 
 # Worktree commands
-twig trees create [project] [branch]   # Create worktree + session
-twig trees list [project]              # List worktrees
-twig trees delete [project] [branch]   # Delete worktree + kill session
+twig tree create [project] [branch]   # Create worktree + session
+twig tree list [project]              # List worktrees
+twig tree delete [project] [branch]   # Delete worktree + kill session
 ```
 
 When creating a project with a git URL, twig extracts the project name automatically:
@@ -59,7 +59,7 @@ When creating a project with a git URL, twig extracts the project name automatic
 twig new git@github.com:user/myproject.git  # Creates project "myproject"
 ```
 
-Aliases: `ls` for `list`, `s` for `start`, `n` for `new`, `e` for `edit`, `rm` for `delete`, `t` for `trees`
+Aliases: `ls` for `list`, `s` for `start`, `n` for `new`, `e` for `edit`, `rm` for `delete`, `t` for `tree`
 
 ## Configuration
 

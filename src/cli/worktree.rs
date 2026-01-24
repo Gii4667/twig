@@ -75,15 +75,26 @@ pub fn list(project_name: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    println!("Worktrees for '{}':", name);
-    for wt in worktrees {
+    // Build tree view
+    let total = worktrees.len();
+    println!("{}", name);
+
+    for (i, wt) in worktrees.iter().enumerate() {
+        let is_last = i == total - 1;
+        let prefix = if is_last { "└── " } else { "├── " };
+
         let session_name = project.worktree_session_name(&wt.branch);
-        let running = if tmux::session_exists(&session_name).unwrap_or(false) {
-            " (running)"
+        let status = if tmux::session_exists(&session_name).unwrap_or(false) {
+            " ● running"
         } else {
             ""
         };
-        println!("  {} -> {:?}{}", wt.branch, wt.path, running);
+
+        println!("{}{}{}", prefix, wt.branch, status);
+
+        // Show path on second line
+        let path_prefix = if is_last { "    " } else { "│   " };
+        println!("{}└── {}", path_prefix, wt.path.display());
     }
 
     Ok(())

@@ -8,15 +8,21 @@ Built to scratch my own itch. Uses [Charmbracelet](https://charm.sh/) tools like
 
 - `tmux`
 - `git`
-- `rust` - Rust toolchain
 - `gum` - [Charmbracelet Gum](https://github.com/charmbracelet/gum)
-- `lefthook` - Git hooks manager (development only)
 
 ## Installation
 
-We recommend using [mise](https://mise.jdx.dev/) to install dependencies.
+We recommend using [mise](https://mise.jdx.dev/) to install.
 
-### From source
+### Via mise
+
+```bash
+mise use -g cargo:https://github.com/andersonkrs/twig gum
+```
+
+This compiles twig from source and installs gum globally.
+
+### From source (for development)
 
 ```bash
 git clone https://github.com/andersonkrs/twig.git ~/Work/twig
@@ -25,9 +31,11 @@ cd ~/Work/twig
 # Install all tools (rust, gum, lefthook) + git hooks
 mise install
 
-# Build and install globally
+# Build
 cargo build --release
-mise use -g twig@path:~/Work/twig/target/release
+
+# Symlink to PATH
+ln -s ~/Work/twig/target/release/twig ~/.local/bin/twig
 ```
 
 ## Usage

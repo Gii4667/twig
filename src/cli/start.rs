@@ -1,13 +1,14 @@
 use anyhow::Result;
 
 use crate::config::Project;
-use crate::gum;
 use crate::tmux::{self, SessionBuilder};
+use crate::ui;
 
 pub fn run(project_name: Option<String>) -> Result<()> {
     let name = match project_name {
         Some(n) => n,
-        None => select_project()?,
+        None => ui::select_project("Select project...")?
+            .ok_or_else(|| anyhow::anyhow!("No project selected"))?,
     };
 
     let project = Project::load(&name)?;
@@ -30,21 +31,4 @@ pub fn run(project_name: Option<String>) -> Result<()> {
     tmux::connect_to_session(&project.name)?;
 
     Ok(())
-}
-
-fn select_project() -> Result<String> {
-    let projects = Project::list_all()?;
-
-    if projects.is_empty() {
-        anyhow::bail!("No projects found. Create one with: twig new <name>");
-    }
-
-    if projects.len() == 1 {
-        return Ok(projects.into_iter().next().unwrap());
-    }
-
-    match gum::filter(&projects, "Select project...")? {
-        Some(selection) => Ok(selection),
-        None => anyhow::bail!("No project selected"),
-    }
 }

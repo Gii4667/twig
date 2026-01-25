@@ -4,8 +4,8 @@ use clap::{Parser, Subcommand};
 mod cli;
 mod config;
 mod git;
-mod gum;
 mod tmux;
+mod ui;
 
 #[derive(Parser)]
 #[command(name = "twig")]
@@ -91,6 +91,15 @@ enum TreeCommands {
         /// Branch name
         branch: Option<String>,
     },
+
+    /// Merge a worktree branch into main/master
+    #[command(alias = "m")]
+    Merge {
+        /// Project name
+        project: Option<String>,
+        /// Branch name
+        branch: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -107,6 +116,7 @@ fn main() -> Result<()> {
             TreeCommands::Create { project, branch } => cli::worktree::create(project, branch),
             TreeCommands::List { project } => cli::worktree::list(project),
             TreeCommands::Delete { project, branch } => cli::worktree::delete(project, branch),
+            TreeCommands::Merge { project, branch } => cli::worktree::merge(project, branch),
         },
     }
 }

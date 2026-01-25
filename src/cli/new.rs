@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::fs;
 
 use crate::config::{GlobalConfig, Project};
-use crate::gum;
+use crate::ui;
 
 pub fn run(name: Option<String>) -> Result<()> {
     GlobalConfig::ensure_dirs()?;
@@ -10,10 +10,8 @@ pub fn run(name: Option<String>) -> Result<()> {
     // Get project name or repo URL
     let input = match name {
         Some(n) => n,
-        None => match gum::input("Project name or repo URL", None)? {
-            Some(n) if !n.is_empty() => n,
-            _ => anyhow::bail!("Project name or repo URL is required"),
-        },
+        None => ui::input("Project", "Project name or repo URL...", None)?
+            .ok_or_else(|| anyhow::anyhow!("Project name or repo URL is required"))?,
     };
 
     // Check if input is a git URL
@@ -37,10 +35,12 @@ pub fn run(name: Option<String>) -> Result<()> {
 
     // Get project root
     let default_root = format!("~/Work/{}", project_name);
-    let root = match gum::input("Project root", Some(&default_root))? {
-        Some(r) if !r.is_empty() => r,
-        _ => default_root,
-    };
+    let root = ui::input(
+        "Project root",
+        "Project root directory...",
+        Some(&default_root),
+    )?
+    .unwrap_or(default_root);
 
     // Generate config content
     let config_content = if let Some(ref url) = repo_url {

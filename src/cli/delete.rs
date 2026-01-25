@@ -1,12 +1,13 @@
 use anyhow::Result;
 
 use crate::config::Project;
-use crate::gum;
+use crate::ui;
 
 pub fn run(project_name: Option<String>) -> Result<()> {
     let name = match project_name {
         Some(n) => n,
-        None => select_project()?,
+        None => ui::select_project("Select project to delete...")?
+            .ok_or_else(|| anyhow::anyhow!("No project selected"))?,
     };
 
     let config_path = Project::config_path(&name)?;
@@ -16,7 +17,7 @@ pub fn run(project_name: Option<String>) -> Result<()> {
     }
 
     // Confirm deletion
-    if !gum::confirm(&format!("Delete project '{}'?", name))? {
+    if !ui::confirm(&format!("Delete project '{}'?", name))? {
         println!("Cancelled.");
         return Ok(());
     }
@@ -25,17 +26,4 @@ pub fn run(project_name: Option<String>) -> Result<()> {
     println!("Deleted project: {}", name);
 
     Ok(())
-}
-
-fn select_project() -> Result<String> {
-    let projects = Project::list_all()?;
-
-    if projects.is_empty() {
-        anyhow::bail!("No projects found");
-    }
-
-    match gum::filter(&projects, "Select project to delete...")? {
-        Some(selection) => Ok(selection),
-        None => anyhow::bail!("No project selected"),
-    }
 }

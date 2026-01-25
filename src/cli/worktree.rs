@@ -3,23 +3,22 @@ use anyhow::Result;
 use crate::cli::tree_view::{self, SelectedAction};
 use crate::config::Project;
 use crate::git;
-use crate::gum;
 use crate::tmux::{self, SessionBuilder};
+use crate::ui;
 
 pub fn create(project_name: Option<String>, branch: Option<String>) -> Result<()> {
     let name = match project_name {
         Some(n) => n,
-        None => select_project("Select project for worktree...")?,
+        None => ui::select_project("Select project for worktree...")?
+            .ok_or_else(|| anyhow::anyhow!("No project selected"))?,
     };
 
     let project = Project::load(&name)?;
 
     let branch_name = match branch {
         Some(b) => b,
-        None => match gum::input("Branch name", None)? {
-            Some(b) if !b.is_empty() => b,
-            _ => anyhow::bail!("Branch name is required"),
-        },
+        None => ui::input("Branch name", "Enter branch name...", None)?
+            .ok_or_else(|| anyhow::anyhow!("Branch name is required"))?,
     };
 
     println!(
@@ -131,18 +130,20 @@ fn start_worktree_session(project_name: &str, branch: &str) -> Result<()> {
 pub fn delete(project_name: Option<String>, branch: Option<String>) -> Result<()> {
     let name = match project_name {
         Some(n) => n,
-        None => select_project("Select project...")?,
+        None => ui::select_project("Select project...")?
+            .ok_or_else(|| anyhow::anyhow!("No project selected"))?,
     };
 
     let project = Project::load(&name)?;
 
     let branch_name = match branch {
         Some(b) => b,
-        None => select_worktree(&project)?,
+        None => ui::select_worktree(&project, "Select worktree to delete...")?
+            .ok_or_else(|| anyhow::anyhow!("No worktree selected"))?,
     };
 
     // Confirm deletion
-    if !gum::confirm(&format!(
+    if !ui::confirm(&format!(
         "Delete worktree '{}' for project '{}'?",
         branch_name, name
     ))? {
@@ -166,34 +167,54 @@ pub fn delete(project_name: Option<String>, branch: Option<String>) -> Result<()
     Ok(())
 }
 
-fn select_project(placeholder: &str) -> Result<String> {
-    let projects = Project::list_all()?;
+pub fn merge(project_name: Option<String>, branch: Option<String>) -> Result<()> {
+    let name = match project_name {
+        Some(n) => n,
+        None => ui::select_project("Select project...")?
+            .ok_or_else(|| anyhow::anyhow!("No project selected"))?,
+    };
 
-    if projects.is_empty() {
-        anyhow::bail!("No projects found. Create one with: twig new <name>");
+    let project = Project::load(&name)?;
+
+    let branch_name = match branch {
+        Some(b) => b,
+        None => ui::select_worktree(&project, "Select worktree to merge...")?
+            .ok_or_else(|| anyhow::anyhow!("No worktree selected"))?,
+    };
+
+    let default_branch = git::get_default_branch(&project.root_expanded())?;
+
+    // Confirm merge
+    if !ui::confirm(&format!(
+        "Merge '{}' into '{}'?",
+        branch_name, default_branch
+    ))? {
+        println!("Cancelled.");
+        return Ok(());
     }
 
-    if projects.len() == 1 {
-        return Ok(projects.into_iter().next().unwrap());
+    // Perform the merge
+    println!("Merging '{}' into '{}'...", branch_name, default_branch);
+    git::merge_branch_to_default(&project.root_expanded(), &branch_name)?;
+    println!("Merged successfully.");
+
+    // Ask if user wants to delete the worktree
+    if ui::confirm(&format!(
+        "Delete worktree '{}' and its session?",
+        branch_name
+    ))? {
+        // Kill the tmux session if running
+        let session_name = project.worktree_session_name(&branch_name);
+        if tmux::session_exists(&session_name)? {
+            println!("Stopping session '{}'...", session_name);
+            tmux::kill_session(&session_name)?;
+        }
+
+        // Delete the worktree (also deletes the local branch)
+        println!("Deleting worktree...");
+        git::delete_worktree(&project, &branch_name)?;
+        println!("Deleted worktree: {}", branch_name);
     }
 
-    match gum::filter(&projects, placeholder)? {
-        Some(selection) => Ok(selection),
-        None => anyhow::bail!("No project selected"),
-    }
-}
-
-fn select_worktree(project: &Project) -> Result<String> {
-    let worktrees = git::list_worktrees(project)?;
-
-    if worktrees.is_empty() {
-        anyhow::bail!("No worktrees found for project '{}'", project.name);
-    }
-
-    let branches: Vec<String> = worktrees.iter().map(|w| w.branch.clone()).collect();
-
-    match gum::filter(&branches, "Select worktree to delete...")? {
-        Some(selection) => Ok(selection),
-        None => anyhow::bail!("No worktree selected"),
-    }
+    Ok(())
 }

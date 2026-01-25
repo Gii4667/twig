@@ -241,6 +241,68 @@ fn check_branch_exists(repo_path: &Path, branch: &str) -> Result<bool> {
     Ok(remote.status.success())
 }
 
+/// Get the default branch (main or master) for a repository
+pub fn get_default_branch(repo_path: &Path) -> Result<String> {
+    // Try to get from remote HEAD
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
+        .output()
+        .context("Failed to get default branch")?;
+
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .strip_prefix("origin/")
+            .unwrap_or("main")
+            .to_string();
+        return Ok(branch);
+    }
+
+    // Fallback: check if main or master exists
+    for branch in ["main", "master"] {
+        let status = Command::new("git")
+            .current_dir(repo_path)
+            .args(["rev-parse", "--verify", branch])
+            .output()?;
+
+        if status.status.success() {
+            return Ok(branch.to_string());
+        }
+    }
+
+    Ok("main".to_string())
+}
+
+/// Merge a branch into the default branch (main/master)
+pub fn merge_branch_to_default(repo_path: &Path, branch: &str) -> Result<()> {
+    let default_branch = get_default_branch(repo_path)?;
+
+    // Checkout default branch
+    let status = Command::new("git")
+        .current_dir(repo_path)
+        .args(["checkout", &default_branch])
+        .status()
+        .context("Failed to checkout default branch")?;
+
+    if !status.success() {
+        anyhow::bail!("Failed to checkout '{}'", default_branch);
+    }
+
+    // Merge the branch
+    let status = Command::new("git")
+        .current_dir(repo_path)
+        .args(["merge", branch])
+        .status()
+        .context("Failed to merge branch")?;
+
+    if !status.success() {
+        anyhow::bail!("Merge failed. Please resolve conflicts manually in the main repository.");
+    }
+
+    Ok(())
+}
+
 /// Recursively copy a directory
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;

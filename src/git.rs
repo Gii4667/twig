@@ -97,7 +97,7 @@ pub fn run_post_create_commands(project: &Project, worktree_path: &Path) -> Resu
     Ok(())
 }
 
-/// Delete a git worktree
+/// Delete a git worktree and its local branch
 pub fn delete_worktree(project: &Project, branch: &str) -> Result<()> {
     let config = GlobalConfig::load()?;
     let project_root = project.root_expanded();
@@ -131,6 +131,33 @@ pub fn delete_worktree(project: &Project, branch: &str) -> Result<()> {
             .args(["worktree", "prune"])
             .status()
             .ok();
+    }
+
+    // Delete the local branch
+    delete_local_branch(&project_root, branch)?;
+
+    Ok(())
+}
+
+/// Delete a local git branch
+fn delete_local_branch(repo_path: &Path, branch: &str) -> Result<()> {
+    // Force delete the branch (-D) since the worktree is already removed
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["branch", "-D", branch])
+        .output()
+        .context("Failed to delete local branch")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Ignore error if branch doesn't exist (may have been a remote-tracking branch)
+        if !stderr.contains("not found") {
+            eprintln!(
+                "Warning: could not delete branch '{}': {}",
+                branch,
+                stderr.trim()
+            );
+        }
     }
 
     Ok(())

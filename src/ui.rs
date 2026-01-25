@@ -1,19 +1,22 @@
 //! Ratatui-based UI components for interactive prompts.
 
-use std::io::{stdout, IsTerminal, Stdout};
+use std::io::{stdout, IsTerminal, Stdout, Write};
 use std::time::Duration;
 
 use anyhow::Result;
+use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    self, disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph,
+    Block, BorderType, Borders, Clear as ClearWidget, HighlightSpacing, List, ListItem, ListState,
+    Paragraph,
 };
 
 use crate::config::Project;
@@ -23,6 +26,9 @@ use crate::tmux;
 // ============================================================================
 // Picker
 // ============================================================================
+
+/// Maximum height for the inline picker
+const PICKER_HEIGHT: u16 = 15;
 
 /// A selectable item in the picker
 #[derive(Debug, Clone)]
@@ -80,10 +86,11 @@ struct PickerApp {
     query: String,
     placeholder: String,
     matcher: SkimMatcherV2,
+    height: u16,
 }
 
 impl PickerApp {
-    fn new(items: Vec<PickerItem>, placeholder: String) -> Self {
+    fn new(items: Vec<PickerItem>, placeholder: String, height: u16) -> Self {
         let filtered_indices: Vec<usize> = (0..items.len()).collect();
         let mut list_state = ListState::default();
         if !items.is_empty() {
@@ -97,6 +104,7 @@ impl PickerApp {
             query: String::new(),
             placeholder,
             matcher: SkimMatcherV2::default(),
+            height,
         }
     }
 
@@ -186,16 +194,75 @@ impl PickerApp {
         None
     }
 
-    fn render(&mut self, frame: &mut Frame) {
+    fn render_inline(&mut self, frame: &mut Frame) {
         let area = frame.size();
 
-        // Calculate centered popup area
-        let popup_width = (area.width.saturating_sub(4)).min(60);
-        let popup_height = (area.height.saturating_sub(4)).min(20);
+        // Use the configured height, but cap at terminal height
+        let height = self.height.min(area.height);
+
+        // Split into search input (1 line) and list
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(Rect::new(0, 0, area.width, height));
+
+        // Search input (single line, no border)
+        let input_text = if self.query.is_empty() {
+            Span::styled(&self.placeholder, Style::default().fg(Color::DarkGray))
+        } else {
+            Span::styled(&self.query, Style::default().fg(Color::White))
+        };
+
+        let input = Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::LightMagenta).bold()),
+            input_text,
+            Span::styled("_", Style::default().fg(Color::LightMagenta)),
+        ]));
+        frame.render_widget(input, chunks[0]);
+
+        // List items (no border for inline mode)
+        let list_items: Vec<ListItem> = self
+            .filtered_indices
+            .iter()
+            .map(|&i| {
+                let item = &self.items[i];
+                let mut spans = vec![Span::styled(item.label.clone(), item.style)];
+
+                if let Some(ref desc) = item.description {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        desc,
+                        Style::default().fg(Color::DarkGray).italic(),
+                    ));
+                }
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+
+        let list = List::new(list_items)
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(80, 60, 120))
+                    .fg(Color::White)
+                    .bold(),
+            )
+            .highlight_symbol("\u{276f} ")
+            .highlight_spacing(HighlightSpacing::Always);
+
+        frame.render_stateful_widget(list, chunks[1], &mut self.list_state);
+    }
+
+    fn render_window(&mut self, frame: &mut Frame) {
+        let area = frame.size();
+
+        // Calculate centered popup area - larger size
+        let popup_width = (area.width.saturating_sub(4)).min(80);
+        let popup_height = (area.height.saturating_sub(4)).min(30);
         let popup_area = centered_rect(popup_width, popup_height, area);
 
         // Clear the popup area
-        frame.render_widget(Clear, popup_area);
+        frame.render_widget(ClearWidget, popup_area);
 
         // Split into search input and list
         let chunks = Layout::default()
@@ -235,7 +302,10 @@ impl PickerApp {
 
                 if let Some(ref desc) = item.description {
                     spans.push(Span::raw(" "));
-                    spans.push(Span::styled(desc, Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(
+                        desc,
+                        Style::default().fg(Color::DarkGray).italic(),
+                    ));
                 }
 
                 ListItem::new(Line::from(spans))
@@ -262,8 +332,22 @@ impl PickerApp {
     }
 }
 
-/// Show an interactive picker with fuzzy search
+/// Show an interactive picker with fuzzy search (inline mode)
 pub fn picker(items: Vec<PickerItem>, placeholder: &str) -> Result<PickerResult> {
+    picker_with_options(items, placeholder, false)
+}
+
+/// Show an interactive picker with fuzzy search (window mode)
+#[allow(dead_code)]
+pub fn picker_window(items: Vec<PickerItem>, placeholder: &str) -> Result<PickerResult> {
+    picker_with_options(items, placeholder, true)
+}
+
+fn picker_with_options(
+    items: Vec<PickerItem>,
+    placeholder: &str,
+    window_mode: bool,
+) -> Result<PickerResult> {
     if items.is_empty() {
         return Ok(PickerResult::Cancelled);
     }
@@ -272,16 +356,54 @@ pub fn picker(items: Vec<PickerItem>, placeholder: &str) -> Result<PickerResult>
         anyhow::bail!("Interactive picker requires a terminal");
     }
 
-    let mut app = PickerApp::new(items, placeholder.to_string());
+    let (_, term_height) = terminal::size()?;
+    let height = PICKER_HEIGHT.min(term_height.saturating_sub(2));
+
+    let mut app = PickerApp::new(items, placeholder.to_string(), height);
 
     enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let result = run_picker_loop(&mut terminal, &mut app);
+    let result = if window_mode {
+        stdout().execute(EnterAlternateScreen)?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+        let res = run_picker_loop(&mut terminal, &mut app, true);
+        disable_raw_mode()?;
+        stdout().execute(LeaveAlternateScreen)?;
+        res
+    } else {
+        // Inline mode: print newlines to make space, then render
+        let mut stdout = stdout();
 
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+        // Make space for the picker
+        for _ in 0..height {
+            writeln!(stdout)?;
+        }
+        // Move cursor back up
+        stdout.execute(MoveUp(height))?;
+        stdout.execute(MoveToColumn(0))?;
+
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(stdout),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, terminal::size()?.0, height)),
+            },
+        )?;
+
+        let res = run_picker_loop(&mut terminal, &mut app, false);
+
+        // Clean up: clear the picker area and move cursor
+        disable_raw_mode()?;
+        let mut out = std::io::stdout();
+        out.execute(MoveToColumn(0))?;
+        for _ in 0..height {
+            out.execute(Clear(ClearType::CurrentLine))?;
+            writeln!(out)?;
+        }
+        out.execute(MoveUp(height))?;
+        out.flush()?;
+
+        res
+    };
 
     result
 }
@@ -289,11 +411,18 @@ pub fn picker(items: Vec<PickerItem>, placeholder: &str) -> Result<PickerResult>
 fn run_picker_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut PickerApp,
+    window_mode: bool,
 ) -> Result<PickerResult> {
     loop {
-        terminal.draw(|frame| app.render(frame))?;
+        terminal.draw(|frame| {
+            if window_mode {
+                app.render_window(frame);
+            } else {
+                app.render_inline(frame);
+            }
+        })?;
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     if let Some(result) = app.handle_key(key.code, key.modifiers) {
@@ -362,16 +491,47 @@ impl ConfirmApp {
         None
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn render_inline(&self, frame: &mut Frame) {
+        let area = frame.size();
+
+        // Single line: message + buttons
+        let yes_style = if self.selected == ConfirmResult::Yes {
+            Style::default()
+                .bg(Color::LightGreen)
+                .fg(Color::Black)
+                .bold()
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let no_style = if self.selected == ConfirmResult::No {
+            Style::default().bg(Color::LightRed).fg(Color::Black).bold()
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let line = Line::from(vec![
+            Span::styled(&self.message, Style::default().fg(Color::White)),
+            Span::raw(" "),
+            Span::styled(" Yes ", yes_style),
+            Span::raw(" "),
+            Span::styled(" No ", no_style),
+        ]);
+
+        let paragraph = Paragraph::new(line);
+        frame.render_widget(paragraph, Rect::new(0, 0, area.width, 1));
+    }
+
+    fn render_window(&self, frame: &mut Frame) {
         let area = frame.size();
 
         // Calculate centered popup area
-        let popup_width = (area.width.saturating_sub(4)).min(50);
+        let popup_width = (area.width.saturating_sub(4)).min(60);
         let popup_height = 5;
         let popup_area = centered_rect(popup_width, popup_height, area);
 
         // Clear the popup area
-        frame.render_widget(Clear, popup_area);
+        frame.render_widget(ClearWidget, popup_area);
 
         // Split into message and buttons
         let chunks = Layout::default()
@@ -424,8 +584,18 @@ impl ConfirmApp {
     }
 }
 
-/// Show a confirmation dialog
+/// Show a confirmation dialog (inline mode)
 pub fn confirm(message: &str) -> Result<bool> {
+    confirm_with_options(message, false)
+}
+
+/// Show a confirmation dialog (window mode)
+#[allow(dead_code)]
+pub fn confirm_window(message: &str) -> Result<bool> {
+    confirm_with_options(message, true)
+}
+
+fn confirm_with_options(message: &str, window_mode: bool) -> Result<bool> {
     if !stdout().is_terminal() {
         anyhow::bail!("Interactive confirm requires a terminal");
     }
@@ -433,13 +603,38 @@ pub fn confirm(message: &str) -> Result<bool> {
     let mut app = ConfirmApp::new(message.to_string());
 
     enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let result = run_confirm_loop(&mut terminal, &mut app);
+    let result = if window_mode {
+        stdout().execute(EnterAlternateScreen)?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+        let res = run_confirm_loop(&mut terminal, &mut app, true);
+        disable_raw_mode()?;
+        stdout().execute(LeaveAlternateScreen)?;
+        res
+    } else {
+        // Inline mode
+        let mut stdout = stdout();
+        writeln!(stdout)?;
+        stdout.execute(MoveUp(1))?;
+        stdout.execute(MoveToColumn(0))?;
 
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(stdout),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, terminal::size()?.0, 1)),
+            },
+        )?;
+
+        let res = run_confirm_loop(&mut terminal, &mut app, false);
+
+        disable_raw_mode()?;
+        let mut out = std::io::stdout();
+        out.execute(MoveToColumn(0))?;
+        out.execute(Clear(ClearType::CurrentLine))?;
+        out.flush()?;
+
+        res
+    };
 
     Ok(result? == ConfirmResult::Yes)
 }
@@ -447,11 +642,18 @@ pub fn confirm(message: &str) -> Result<bool> {
 fn run_confirm_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut ConfirmApp,
+    window_mode: bool,
 ) -> Result<ConfirmResult> {
     loop {
-        terminal.draw(|frame| app.render(frame))?;
+        terminal.draw(|frame| {
+            if window_mode {
+                app.render_window(frame);
+            } else {
+                app.render_inline(frame);
+            }
+        })?;
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     if let Some(result) = app.handle_key(key.code, key.modifiers) {
@@ -509,16 +711,37 @@ impl InputApp {
         None
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn render_inline(&self, frame: &mut Frame) {
+        let area = frame.size();
+
+        // Single line: title + input
+        let input_text = if self.value.is_empty() {
+            Span::styled(&self.placeholder, Style::default().fg(Color::DarkGray))
+        } else {
+            Span::styled(&self.value, Style::default().fg(Color::White))
+        };
+
+        let line = Line::from(vec![
+            Span::styled(&self.title, Style::default().fg(Color::LightCyan).bold()),
+            Span::raw(": "),
+            input_text,
+            Span::styled("_", Style::default().fg(Color::LightMagenta)),
+        ]);
+
+        let paragraph = Paragraph::new(line);
+        frame.render_widget(paragraph, Rect::new(0, 0, area.width, 1));
+    }
+
+    fn render_window(&self, frame: &mut Frame) {
         let area = frame.size();
 
         // Calculate centered popup area
-        let popup_width = (area.width.saturating_sub(4)).min(60);
+        let popup_width = (area.width.saturating_sub(4)).min(70);
         let popup_height = 3;
         let popup_area = centered_rect(popup_width, popup_height, area);
 
         // Clear the popup area
-        frame.render_widget(Clear, popup_area);
+        frame.render_widget(ClearWidget, popup_area);
 
         // Input text
         let input_text = if self.value.is_empty() {
@@ -543,8 +766,27 @@ impl InputApp {
     }
 }
 
-/// Show an input dialog
+/// Show an input dialog (inline mode)
 pub fn input(title: &str, placeholder: &str, default: Option<&str>) -> Result<Option<String>> {
+    input_with_options(title, placeholder, default, false)
+}
+
+/// Show an input dialog (window mode)
+#[allow(dead_code)]
+pub fn input_window(
+    title: &str,
+    placeholder: &str,
+    default: Option<&str>,
+) -> Result<Option<String>> {
+    input_with_options(title, placeholder, default, true)
+}
+
+fn input_with_options(
+    title: &str,
+    placeholder: &str,
+    default: Option<&str>,
+    window_mode: bool,
+) -> Result<Option<String>> {
     if !stdout().is_terminal() {
         anyhow::bail!("Interactive input requires a terminal");
     }
@@ -556,13 +798,38 @@ pub fn input(title: &str, placeholder: &str, default: Option<&str>) -> Result<Op
     );
 
     enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let result = run_input_loop(&mut terminal, &mut app);
+    let result = if window_mode {
+        stdout().execute(EnterAlternateScreen)?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+        let res = run_input_loop(&mut terminal, &mut app, true);
+        disable_raw_mode()?;
+        stdout().execute(LeaveAlternateScreen)?;
+        res
+    } else {
+        // Inline mode
+        let mut stdout = stdout();
+        writeln!(stdout)?;
+        stdout.execute(MoveUp(1))?;
+        stdout.execute(MoveToColumn(0))?;
 
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(stdout),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, terminal::size()?.0, 1)),
+            },
+        )?;
+
+        let res = run_input_loop(&mut terminal, &mut app, false);
+
+        disable_raw_mode()?;
+        let mut out = std::io::stdout();
+        out.execute(MoveToColumn(0))?;
+        out.execute(Clear(ClearType::CurrentLine))?;
+        out.flush()?;
+
+        res
+    };
 
     result
 }
@@ -570,11 +837,18 @@ pub fn input(title: &str, placeholder: &str, default: Option<&str>) -> Result<Op
 fn run_input_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut InputApp,
+    window_mode: bool,
 ) -> Result<Option<String>> {
     loop {
-        terminal.draw(|frame| app.render(frame))?;
+        terminal.draw(|frame| {
+            if window_mode {
+                app.render_window(frame);
+            } else {
+                app.render_inline(frame);
+            }
+        })?;
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     if let Some(result) = app.handle_key(key.code, key.modifiers) {

@@ -395,15 +395,12 @@ fn picker_with_options(
 
         let res = run_picker_loop(&mut terminal, &mut app, false);
 
-        // Clean up: clear the picker area and move cursor
+        // Clean up: clear the picker area
         disable_raw_mode()?;
         let mut out = std::io::stdout();
+        // Clear from cursor to end of screen (covers all picker lines)
         out.execute(MoveToColumn(0))?;
-        for _ in 0..height {
-            out.execute(Clear(ClearType::CurrentLine))?;
-            writeln!(out)?;
-        }
-        out.execute(MoveUp(height))?;
+        out.execute(Clear(ClearType::FromCursorDown))?;
         out.flush()?;
 
         res
@@ -635,10 +632,11 @@ fn confirm_with_options(message: &str, window_mode: bool) -> Result<bool> {
 
         let res = run_confirm_loop(&mut terminal, &mut app, false);
 
+        // Clean up: clear the line
         disable_raw_mode()?;
         let mut out = std::io::stdout();
         out.execute(MoveToColumn(0))?;
-        out.execute(Clear(ClearType::CurrentLine))?;
+        out.execute(Clear(ClearType::FromCursorDown))?;
         out.flush()?;
 
         res
@@ -834,10 +832,11 @@ fn input_with_options(
 
         let res = run_input_loop(&mut terminal, &mut app, false);
 
+        // Clean up: clear the line
         disable_raw_mode()?;
         let mut out = std::io::stdout();
         out.execute(MoveToColumn(0))?;
-        out.execute(Clear(ClearType::CurrentLine))?;
+        out.execute(Clear(ClearType::FromCursorDown))?;
         out.flush()?;
 
         res

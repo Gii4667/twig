@@ -192,11 +192,11 @@ impl SessionBuilder {
                 "set-environment",
                 "-t",
                 &self.session_name,
-                "_TWIG_PROJECT",
+                "TWIG_PROJECT",
                 &self.project_name,
             ])
             .status()
-            .context("Failed to set _TWIG_PROJECT")?;
+            .context("Failed to set TWIG_PROJECT")?;
 
         if let Some(branch) = &self.worktree_branch {
             Command::new("tmux")
@@ -204,11 +204,11 @@ impl SessionBuilder {
                     "set-environment",
                     "-t",
                     &self.session_name,
-                    "_TWIG_WORKTREE",
+                    "TWIG_WORKTREE",
                     branch,
                 ])
                 .status()
-                .context("Failed to set _TWIG_WORKTREE")?;
+                .context("Failed to set TWIG_WORKTREE")?;
         }
 
         // Get the base index for windows

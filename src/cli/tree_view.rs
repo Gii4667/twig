@@ -1,5 +1,6 @@
 //! Interactive tree view for projects and worktrees using Ratatui.
 
+use std::env;
 use std::io::{self, stdout, IsTerminal};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,29 @@ use tui_tree_widget::{Tree, TreeItem, TreeState};
 use crate::config::Project;
 use crate::git::{self, WorktreeInfo};
 use crate::tmux;
+
+/// Current session context from environment
+struct CurrentContext {
+    project: Option<String>,
+    worktree: Option<String>,
+}
+
+impl CurrentContext {
+    fn from_env() -> Self {
+        Self {
+            project: env::var("TWIG_PROJECT").ok(),
+            worktree: env::var("TWIG_WORKTREE").ok(),
+        }
+    }
+
+    fn is_current_project(&self, name: &str) -> bool {
+        self.project.as_deref() == Some(name) && self.worktree.is_none()
+    }
+
+    fn is_current_worktree(&self, project: &str, branch: &str) -> bool {
+        self.project.as_deref() == Some(project) && self.worktree.as_deref() == Some(branch)
+    }
+}
 
 /// Unique identifier for tree nodes
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -83,8 +107,9 @@ impl<'a> TreeViewApp<'a> {
         projects: Vec<ProjectData>,
         running_sessions: &[String],
         mode: TreeViewMode,
+        current: &CurrentContext,
     ) -> Result<Self> {
-        let tree_items = build_tree_items(&projects, running_sessions)?;
+        let tree_items = build_tree_items(&projects, running_sessions, current)?;
         let candidates = build_candidates(&projects);
 
         let mut tree_state = TreeState::default();
@@ -320,26 +345,38 @@ enum HandleResult {
 fn build_tree_items<'a>(
     projects: &[ProjectData],
     running_sessions: &[String],
+    current: &CurrentContext,
 ) -> Result<Vec<TreeItem<'a, TreeNodeId>>> {
     let mut items = Vec::new();
 
     for project in projects {
+        let is_current = current.is_current_project(&project.name);
+
         // Build styled project text - bright colors for visibility
-        let project_line: Line = if project.session_running {
-            Line::from(vec![
-                Span::styled(
-                    project.name.clone(),
-                    Style::default().fg(Color::LightYellow).bold(),
-                ),
-                Span::styled(" \u{25cf}", Style::default().fg(Color::LightGreen)),
-                Span::styled(" running", Style::default().fg(Color::LightGreen).italic()),
-            ])
-        } else {
-            Line::from(vec![Span::styled(
-                project.name.clone(),
-                Style::default().fg(Color::LightYellow).bold(),
-            )])
-        };
+        let mut spans = vec![Span::styled(
+            project.name.clone(),
+            Style::default().fg(Color::LightYellow).bold(),
+        )];
+
+        if is_current {
+            spans.push(Span::styled(
+                " \u{25c0}",
+                Style::default().fg(Color::LightMagenta),
+            )); // ◀ current indicator
+        }
+
+        if project.session_running {
+            spans.push(Span::styled(
+                " \u{25cf}",
+                Style::default().fg(Color::LightGreen),
+            ));
+            spans.push(Span::styled(
+                " running",
+                Style::default().fg(Color::LightGreen).italic(),
+            ));
+        }
+
+        let project_line: Line = Line::from(spans);
 
         let children: Vec<TreeItem<'a, TreeNodeId>> = project
             .worktrees
@@ -347,20 +384,33 @@ fn build_tree_items<'a>(
             .map(|wt| {
                 let session_name = format!("{}__{}", project.name, wt.branch);
                 let is_running = running_sessions.contains(&session_name);
+                let is_current_wt = current.is_current_worktree(&project.name, &wt.branch);
 
                 // Build styled worktree text - bright colors
-                let wt_line: Line = if is_running {
-                    Line::from(vec![
-                        Span::styled(wt.branch.clone(), Style::default().fg(Color::LightCyan)),
-                        Span::styled(" \u{25cf}", Style::default().fg(Color::LightGreen)),
-                        Span::styled(" running", Style::default().fg(Color::LightGreen).italic()),
-                    ])
-                } else {
-                    Line::from(vec![Span::styled(
-                        wt.branch.clone(),
-                        Style::default().fg(Color::LightCyan),
-                    )])
-                };
+                let mut wt_spans = vec![Span::styled(
+                    wt.branch.clone(),
+                    Style::default().fg(Color::LightCyan),
+                )];
+
+                if is_current_wt {
+                    wt_spans.push(Span::styled(
+                        " \u{25c0}",
+                        Style::default().fg(Color::LightMagenta),
+                    )); // ◀ current indicator
+                }
+
+                if is_running {
+                    wt_spans.push(Span::styled(
+                        " \u{25cf}",
+                        Style::default().fg(Color::LightGreen),
+                    ));
+                    wt_spans.push(Span::styled(
+                        " running",
+                        Style::default().fg(Color::LightGreen).italic(),
+                    ));
+                }
+
+                let wt_line: Line = Line::from(wt_spans);
 
                 TreeItem::new_leaf(
                     TreeNodeId::Worktree {
@@ -420,8 +470,28 @@ fn build_candidates(projects: &[ProjectData]) -> Vec<SearchCandidate> {
     candidates
 }
 
-/// Load project data (projects + their worktrees)
-fn load_project_data(project_filter: Option<&str>, running_only: bool) -> Result<Vec<ProjectData>> {
+/// Options for loading project data
+struct LoadOptions {
+    /// Filter to a specific project name
+    project_filter: Option<String>,
+    /// Only show running sessions
+    running_only: bool,
+    /// Include worktrees (false = projects only)
+    include_worktrees: bool,
+}
+
+impl Default for LoadOptions {
+    fn default() -> Self {
+        Self {
+            project_filter: None,
+            running_only: false,
+            include_worktrees: true,
+        }
+    }
+}
+
+/// Load project data (projects + optionally their worktrees)
+fn load_project_data(opts: LoadOptions) -> Result<Vec<ProjectData>> {
     let project_names = Project::list_all()?;
     let running_sessions = tmux::list_sessions().unwrap_or_default();
 
@@ -429,8 +499,8 @@ fn load_project_data(project_filter: Option<&str>, running_only: bool) -> Result
 
     for name in project_names {
         // Apply filter if provided
-        if let Some(filter) = project_filter {
-            if name != filter {
+        if let Some(ref filter) = opts.project_filter {
+            if name != *filter {
                 continue;
             }
         }
@@ -440,24 +510,30 @@ fn load_project_data(project_filter: Option<&str>, running_only: bool) -> Result
             Err(_) => continue, // Skip projects that fail to load
         };
 
-        let worktrees = git::list_worktrees(&project).unwrap_or_default();
         let session_running = running_sessions.contains(&name);
 
-        // Filter worktrees to only running ones if running_only
-        let filtered_worktrees: Vec<WorktreeInfo> = if running_only {
-            worktrees
-                .into_iter()
-                .filter(|wt| {
-                    let session_name = format!("{}__{}", name, wt.branch);
-                    running_sessions.contains(&session_name)
-                })
-                .collect()
+        // Get worktrees only if requested
+        let filtered_worktrees: Vec<WorktreeInfo> = if opts.include_worktrees {
+            let worktrees = git::list_worktrees(&project).unwrap_or_default();
+
+            // Filter worktrees to only running ones if running_only
+            if opts.running_only {
+                worktrees
+                    .into_iter()
+                    .filter(|wt| {
+                        let session_name = format!("{}__{}", name, wt.branch);
+                        running_sessions.contains(&session_name)
+                    })
+                    .collect()
+            } else {
+                worktrees
+            }
         } else {
-            worktrees
+            Vec::new()
         };
 
         // In running_only mode, skip projects with no running sessions
-        if running_only && !session_running && filtered_worktrees.is_empty() {
+        if opts.running_only && !session_running && filtered_worktrees.is_empty() {
             continue;
         }
 
@@ -471,23 +547,47 @@ fn load_project_data(project_filter: Option<&str>, running_only: bool) -> Result
     Ok(data)
 }
 
-/// Run the interactive tree view for starting sessions
+/// Run the interactive tree view for starting sessions (with worktrees)
 pub fn run(project_filter: Option<String>) -> Result<Option<SelectedAction>> {
-    run_with_mode(project_filter, TreeViewMode::Start, false)
+    run_with_options(
+        LoadOptions {
+            project_filter,
+            running_only: false,
+            include_worktrees: true,
+        },
+        TreeViewMode::Start,
+    )
+}
+
+/// Run the interactive tree view for projects only (no worktrees)
+pub fn run_projects_only() -> Result<Option<SelectedAction>> {
+    run_with_options(
+        LoadOptions {
+            project_filter: None,
+            running_only: false,
+            include_worktrees: false,
+        },
+        TreeViewMode::Start,
+    )
 }
 
 /// Run the interactive tree view for killing sessions (shows only running)
 pub fn run_for_kill(session_filter: Option<String>) -> Result<Option<SelectedAction>> {
-    run_with_mode(session_filter, TreeViewMode::Kill, true)
+    run_with_options(
+        LoadOptions {
+            project_filter: session_filter,
+            running_only: true,
+            include_worktrees: true,
+        },
+        TreeViewMode::Kill,
+    )
 }
 
-/// Run the interactive tree view with specified mode
-fn run_with_mode(
-    filter: Option<String>,
-    mode: TreeViewMode,
-    running_only: bool,
-) -> Result<Option<SelectedAction>> {
-    let projects = load_project_data(filter.as_deref(), running_only)?;
+/// Run the interactive tree view with specified options
+fn run_with_options(opts: LoadOptions, mode: TreeViewMode) -> Result<Option<SelectedAction>> {
+    let filter = opts.project_filter.clone();
+    let running_only = opts.running_only;
+    let projects = load_project_data(opts)?;
 
     if projects.is_empty() {
         if running_only {
@@ -508,7 +608,8 @@ fn run_with_mode(
     }
 
     let running_sessions = tmux::list_sessions().unwrap_or_default();
-    let mut app = TreeViewApp::new(projects, &running_sessions, mode)?;
+    let current = CurrentContext::from_env();
+    let mut app = TreeViewApp::new(projects, &running_sessions, mode, &current)?;
 
     // Setup terminal
     enable_raw_mode()?;

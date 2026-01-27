@@ -372,18 +372,24 @@ fn build_tree_items<'a>(
     for project in projects {
         let is_current = current.is_current_project(&project.name);
 
-        // Build styled project text - bright colors for visibility
-        let mut spans = vec![Span::styled(
-            project.name.clone(),
-            Style::default().fg(Color::LightYellow).bold(),
-        )];
+        // Build styled project text - use magenta for current, yellow for others
+        let name_style = if is_current {
+            Style::default().fg(Color::LightMagenta).bold()
+        } else {
+            Style::default().fg(Color::LightYellow).bold()
+        };
 
-        if is_current {
-            spans.push(Span::styled(
-                " \u{25c0}",
+        // Current indicator before name, with spacing for alignment
+        let mut spans = if is_current {
+            vec![Span::styled(
+                "\u{25b6} ", // ▶ current indicator
                 Style::default().fg(Color::LightMagenta),
-            )); // ◀ current indicator
-        }
+            )]
+        } else {
+            vec![Span::raw("  ")] // spacing for alignment
+        };
+
+        spans.push(Span::styled(project.name.clone(), name_style));
 
         if project.session_running {
             spans.push(Span::styled(
@@ -406,18 +412,24 @@ fn build_tree_items<'a>(
                 let is_running = running_sessions.contains(&session_name);
                 let is_current_wt = current.is_current_worktree(&project.name, &wt.branch);
 
-                // Build styled worktree text - bright colors
-                let mut wt_spans = vec![Span::styled(
-                    wt.branch.clone(),
-                    Style::default().fg(Color::LightCyan),
-                )];
+                // Build styled worktree text - use magenta for current, cyan for others
+                let branch_style = if is_current_wt {
+                    Style::default().fg(Color::LightMagenta).bold()
+                } else {
+                    Style::default().fg(Color::LightCyan)
+                };
 
-                if is_current_wt {
-                    wt_spans.push(Span::styled(
-                        " \u{25c0}",
+                // Current indicator before name, with spacing for alignment
+                let mut wt_spans = if is_current_wt {
+                    vec![Span::styled(
+                        "\u{25b6} ", // ▶ current indicator
                         Style::default().fg(Color::LightMagenta),
-                    )); // ◀ current indicator
-                }
+                    )]
+                } else {
+                    vec![Span::raw("  ")] // spacing for alignment
+                };
+
+                wt_spans.push(Span::styled(wt.branch.clone(), branch_style));
 
                 if is_running {
                     wt_spans.push(Span::styled(

@@ -14,21 +14,26 @@ pub fn create(project_name: Option<String>, branch: Option<String>) -> Result<()
             .ok_or_else(|| anyhow::anyhow!("No project selected"))?,
     };
 
-    let project = Project::load(&name)?;
-
     let branch_name = match branch {
         Some(b) => b,
         None => ui::input("Branch name", "Enter branch name...", None)?
             .ok_or_else(|| anyhow::anyhow!("Branch name is required"))?,
     };
 
+    create_and_start(&name, &branch_name)
+}
+
+/// Create a worktree and start its tmux session
+fn create_and_start(project_name: &str, branch_name: &str) -> Result<()> {
+    let project = Project::load(project_name)?;
+
     println!(
         "Creating worktree for '{}' on branch '{}'...",
-        name, branch_name
+        project_name, branch_name
     );
 
     // Create the git worktree
-    let worktree_path = git::create_worktree(&project, &branch_name)?;
+    let worktree_path = git::create_worktree(&project, branch_name)?;
     println!("Created worktree at: {:?}", worktree_path);
 
     // Run post-create commands if configured
@@ -43,7 +48,7 @@ pub fn create(project_name: Option<String>, branch: Option<String>) -> Result<()
     }
 
     // Create tmux session for the worktree
-    let session_name = project.worktree_session_name(&branch_name);
+    let session_name = project.worktree_session_name(branch_name);
 
     if tmux::session_exists(&session_name)? {
         println!("Session '{}' already exists, attaching...", session_name);
@@ -55,7 +60,7 @@ pub fn create(project_name: Option<String>, branch: Option<String>) -> Result<()
     SessionBuilder::new(&project)
         .with_session_name(session_name.clone())
         .with_root(worktree_path.to_string_lossy().to_string())
-        .with_worktree(branch_name.clone())
+        .with_worktree(branch_name.to_string())
         .build()?;
 
     tmux::connect_to_session(&session_name)?;

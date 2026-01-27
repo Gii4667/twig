@@ -90,16 +90,48 @@ pub enum TreeViewMode {
     Kill,
 }
 
+/// Status message to display in the tree view
+#[derive(Debug, Clone)]
+struct StatusMessage {
+    text: String,
+    is_error: bool,
+    timestamp: Instant,
+}
+
+impl StatusMessage {
+    fn info(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            is_error: false,
+            timestamp: Instant::now(),
+        }
+    }
+
+    fn error(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            is_error: true,
+            timestamp: Instant::now(),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.timestamp.elapsed() > Duration::from_secs(3)
+    }
+}
+
 /// App state for the tree view
 struct TreeViewApp<'a> {
     tree_items: Vec<TreeItem<'a, TreeNodeId>>,
     tree_state: TreeState<TreeNodeId>,
     candidates: Vec<SearchCandidate>,
     query: String,
-    last_typed: Instant,
-    timeout: Duration,
     no_match: bool,
+    search_mode: bool,
     mode: TreeViewMode,
+    status_message: Option<StatusMessage>,
+    /// Session to switch to after exiting (when current session was deleted)
+    switch_to_session: Option<String>,
 }
 
 impl<'a> TreeViewApp<'a> {
@@ -127,34 +159,73 @@ impl<'a> TreeViewApp<'a> {
             tree_state,
             candidates,
             query: String::new(),
-            last_typed: Instant::now(),
-            timeout: Duration::from_millis(800),
+            search_mode: false,
             no_match: false,
             mode,
+            status_message: None,
+            switch_to_session: None,
         })
     }
 
+    /// Refresh tree data (after worktree operations)
+    fn refresh(&mut self, select_project: Option<&str>) -> Result<()> {
+        let running_sessions = tmux::list_sessions().unwrap_or_default();
+        let current = CurrentContext::from_env();
+
+        // Reload all project data
+        let opts = LoadOptions {
+            project_filter: None,
+            running_only: self.mode == TreeViewMode::Kill,
+            include_worktrees: true,
+        };
+        let projects = load_project_data(opts)?;
+
+        self.tree_items = build_tree_items(&projects, &running_sessions, &current)?;
+        self.candidates = build_candidates(&projects);
+
+        // Re-open all projects
+        for project in &projects {
+            self.tree_state
+                .open(vec![TreeNodeId::Project(project.name.clone())]);
+        }
+
+        // Select the specified project or first item
+        if let Some(project_name) = select_project {
+            self.tree_state
+                .select(vec![TreeNodeId::Project(project_name.to_string())]);
+        } else if !projects.is_empty() {
+            self.tree_state
+                .select(vec![TreeNodeId::Project(projects[0].name.clone())]);
+        }
+
+        Ok(())
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<HandleResult> {
+        // Search mode handling
+        if self.search_mode {
+            return self.handle_search_key(code, modifiers);
+        }
+
         match code {
-            KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
+            // Quit
+            KeyCode::Char('q') | KeyCode::Esc => {
                 return Some(HandleResult::Quit);
             }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 return Some(HandleResult::Quit);
             }
-            KeyCode::Esc => {
-                if !self.query.is_empty() {
-                    self.query.clear();
-                    self.no_match = false;
-                } else {
-                    return Some(HandleResult::Quit);
-                }
+
+            // Enter search mode
+            KeyCode::Char('/') => {
+                self.search_mode = true;
+                self.query.clear();
+                self.no_match = false;
             }
 
-            // Kill session with Ctrl+K
-            KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+            // Stop/Kill session
+            KeyCode::Char('s') | KeyCode::Char('S') => {
                 if let Some(action) = self.get_selected_action() {
-                    // Convert to kill action regardless of mode
                     let kill_action = match action {
                         SelectedAction::StartProject(name) | SelectedAction::KillProject(name) => {
                             SelectedAction::KillProject(name)
@@ -168,23 +239,38 @@ impl<'a> TreeViewApp<'a> {
                 }
             }
 
+            // Fork worktree
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                if let Some(project) = self.get_selected_project() {
+                    return Some(HandleResult::ForkWorktree(project));
+                }
+            }
+
+            // Merge worktree (only on worktree nodes)
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                if let Some((project, branch)) = self.get_selected_worktree() {
+                    return Some(HandleResult::MergeWorktree { project, branch });
+                }
+            }
+
+            // Delete worktree (only on worktree nodes)
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if let Some((project, branch)) = self.get_selected_worktree() {
+                    return Some(HandleResult::DeleteWorktree { project, branch });
+                }
+            }
+
             // Navigation
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 self.tree_state.key_up();
             }
-            KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.tree_state.key_up();
-            }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 self.tree_state.key_down();
             }
-            KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.tree_state.key_down();
-            }
-            KeyCode::Left if self.query.is_empty() => {
+            KeyCode::Left | KeyCode::Char('h') => {
                 self.tree_state.key_left();
             }
-            KeyCode::Right if self.query.is_empty() => {
+            KeyCode::Right | KeyCode::Char('l') => {
                 self.tree_state.key_right();
             }
 
@@ -195,7 +281,38 @@ impl<'a> TreeViewApp<'a> {
                 }
             }
 
-            // Typeahead search
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_search_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<HandleResult> {
+        match code {
+            // Exit search mode (keep cursor position)
+            KeyCode::Esc => {
+                self.search_mode = false;
+                self.query.clear();
+                self.no_match = false;
+            }
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.search_mode = false;
+                self.query.clear();
+                self.no_match = false;
+            }
+
+            // Confirm search and exit search mode
+            KeyCode::Enter => {
+                self.search_mode = false;
+                // Keep query visible briefly, then clear
+                self.query.clear();
+                self.no_match = false;
+            }
+
+            // Search input
             KeyCode::Backspace => {
                 self.query.pop();
                 if self.query.is_empty() {
@@ -204,14 +321,17 @@ impl<'a> TreeViewApp<'a> {
                     self.do_fuzzy_search();
                 }
             }
-            KeyCode::Char(c) => {
-                // Reset query if timeout elapsed
-                if self.last_typed.elapsed() > self.timeout {
-                    self.query.clear();
-                }
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
                 self.query.push(c);
-                self.last_typed = Instant::now();
                 self.do_fuzzy_search();
+            }
+
+            // Allow navigation while searching
+            KeyCode::Up => {
+                self.tree_state.key_up();
+            }
+            KeyCode::Down => {
+                self.tree_state.key_down();
             }
 
             _ => {}
@@ -278,6 +398,80 @@ impl<'a> TreeViewApp<'a> {
         }
     }
 
+    /// Get the project name from the current selection (works for both project and worktree nodes)
+    fn get_selected_project(&self) -> Option<String> {
+        let selected = self.tree_state.selected();
+        if selected.is_empty() {
+            return None;
+        }
+
+        match &selected[selected.len() - 1] {
+            TreeNodeId::Root => None,
+            TreeNodeId::Project(name) => Some(name.clone()),
+            TreeNodeId::Worktree { project, .. } => Some(project.clone()),
+        }
+    }
+
+    /// Get worktree info if current selection is a worktree
+    fn get_selected_worktree(&self) -> Option<(String, String)> {
+        let selected = self.tree_state.selected();
+        if selected.is_empty() {
+            return None;
+        }
+
+        match &selected[selected.len() - 1] {
+            TreeNodeId::Worktree { project, branch } => Some((project.clone(), branch.clone())),
+            _ => None,
+        }
+    }
+
+    /// Check if current selection is a worktree
+    fn is_worktree_selected(&self) -> bool {
+        self.get_selected_worktree().is_some()
+    }
+
+    fn build_default_status_line(&self) -> Line<'static> {
+        let separator_color = match self.mode {
+            TreeViewMode::Start => Color::LightMagenta,
+            TreeViewMode::Kill => Color::LightRed,
+        };
+        let is_worktree = self.is_worktree_selected();
+
+        let mut spans = vec![
+            Span::styled("j/k", Style::default().fg(Color::LightCyan)),
+            Span::styled(" nav ", Style::default().fg(Color::Gray)),
+            Span::styled("\u{2502} ", Style::default().fg(separator_color)),
+            Span::styled("/", Style::default().fg(Color::LightCyan)),
+            Span::styled(" search ", Style::default().fg(Color::Gray)),
+            Span::styled("\u{2502} ", Style::default().fg(separator_color)),
+            Span::styled("f", Style::default().fg(Color::LightCyan)),
+            Span::styled("ork ", Style::default().fg(Color::Gray)),
+            Span::styled("\u{2502} ", Style::default().fg(separator_color)),
+            Span::styled("s", Style::default().fg(Color::LightCyan)),
+            Span::styled("top ", Style::default().fg(Color::Gray)),
+        ];
+
+        // Show worktree-specific shortcuts only when on a worktree
+        if is_worktree {
+            spans.extend([
+                Span::styled("\u{2502} ", Style::default().fg(separator_color)),
+                Span::styled("m", Style::default().fg(Color::LightCyan)),
+                Span::styled("erge ", Style::default().fg(Color::Gray)),
+                Span::styled("\u{2502} ", Style::default().fg(separator_color)),
+                Span::styled("d", Style::default().fg(Color::LightCyan)),
+                Span::styled("elete ", Style::default().fg(Color::Gray)),
+            ]);
+        }
+
+        spans.extend([
+            Span::styled("\u{2502} ", Style::default().fg(separator_color)),
+            Span::styled("q", Style::default().fg(Color::LightCyan)),
+            Span::styled("uit", Style::default().fg(Color::Gray)),
+        ]);
+
+        Line::from(spans)
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -315,40 +509,48 @@ impl<'a> TreeViewApp<'a> {
         frame.render_stateful_widget(tree, chunks[0], &mut self.tree_state);
 
         // Status bar with styling
-        let status_line = if !self.query.is_empty() {
-            if self.no_match {
-                Line::from(vec![
-                    Span::styled("Search: ", Style::default().fg(Color::LightCyan)),
-                    Span::styled(&self.query, Style::default().fg(Color::LightYellow).bold()),
-                    Span::styled(" (no match)", Style::default().fg(Color::LightRed).italic()),
-                ])
+        // Check for status message (takes priority)
+        let status_line = if let Some(ref msg) = self.status_message {
+            if !msg.is_expired() {
+                let color = if msg.is_error {
+                    Color::LightRed
+                } else {
+                    Color::LightGreen
+                };
+                Line::from(vec![Span::styled(&msg.text, Style::default().fg(color))])
             } else {
-                Line::from(vec![
-                    Span::styled("Search: ", Style::default().fg(Color::LightCyan)),
-                    Span::styled(&self.query, Style::default().fg(Color::LightGreen).bold()),
-                ])
+                self.build_default_status_line()
             }
+        } else if self.search_mode {
+            // Search mode - show search input
+            let mut spans = vec![Span::styled(
+                "/",
+                Style::default().fg(Color::LightMagenta).bold(),
+            )];
+            if self.query.is_empty() {
+                spans.push(Span::styled(
+                    "type to search...",
+                    Style::default().fg(Color::DarkGray).italic(),
+                ));
+            } else {
+                let query_color = if self.no_match {
+                    Color::LightRed
+                } else {
+                    Color::LightGreen
+                };
+                spans.push(Span::styled(
+                    &self.query,
+                    Style::default().fg(query_color).bold(),
+                ));
+            }
+            spans.push(Span::styled("_", Style::default().fg(Color::LightMagenta)));
+            spans.push(Span::styled(
+                "  (Esc to exit)",
+                Style::default().fg(Color::DarkGray),
+            ));
+            Line::from(spans)
         } else {
-            let (action_text, separator_color) = match self.mode {
-                TreeViewMode::Start => (" select ", Color::LightMagenta),
-                TreeViewMode::Kill => (" kill ", Color::LightRed),
-            };
-            Line::from(vec![
-                Span::styled("Type", Style::default().fg(Color::LightCyan)),
-                Span::styled(" to search ", Style::default().fg(Color::Gray)),
-                Span::styled("\u{2502} ", Style::default().fg(separator_color)),
-                Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::LightCyan)),
-                Span::styled(" navigate ", Style::default().fg(Color::Gray)),
-                Span::styled("\u{2502} ", Style::default().fg(separator_color)),
-                Span::styled("Enter", Style::default().fg(Color::LightCyan)),
-                Span::styled(action_text, Style::default().fg(Color::Gray)),
-                Span::styled("\u{2502} ", Style::default().fg(separator_color)),
-                Span::styled("^K", Style::default().fg(Color::LightCyan)),
-                Span::styled(" kill ", Style::default().fg(Color::Gray)),
-                Span::styled("\u{2502} ", Style::default().fg(separator_color)),
-                Span::styled("^W", Style::default().fg(Color::LightCyan)),
-                Span::styled(" quit", Style::default().fg(Color::Gray)),
-            ])
+            self.build_default_status_line()
         };
 
         let status = Paragraph::new(status_line);
@@ -359,6 +561,18 @@ impl<'a> TreeViewApp<'a> {
 enum HandleResult {
     Quit,
     Action(SelectedAction),
+    /// Fork worktree - handled internally, returns to tree view if cancelled
+    ForkWorktree(String),
+    /// Merge worktree - handled internally with refresh
+    MergeWorktree {
+        project: String,
+        branch: String,
+    },
+    /// Delete worktree - handled internally with refresh
+    DeleteWorktree {
+        project: String,
+        branch: String,
+    },
 }
 
 /// Build tree items from project data
@@ -662,21 +876,747 @@ fn run_event_loop(
     app: &mut TreeViewApp,
 ) -> Result<Option<SelectedAction>> {
     loop {
+        // Clear expired status messages
+        if let Some(ref msg) = app.status_message {
+            if msg.is_expired() {
+                app.status_message = None;
+            }
+        }
+
         terminal.draw(|frame| app.render(frame))?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     if let Some(result) = app.handle_key(key.code, key.modifiers) {
-                        return match result {
-                            HandleResult::Quit => Ok(None),
-                            HandleResult::Action(action) => Ok(Some(action)),
-                        };
+                        match result {
+                            HandleResult::Quit => {
+                                // If we need to switch sessions, return that info
+                                if let Some(session) = app.switch_to_session.take() {
+                                    return Ok(Some(SelectedAction::StartProject(session)));
+                                }
+                                return Ok(None);
+                            }
+                            HandleResult::Action(action) => return Ok(Some(action)),
+                            HandleResult::ForkWorktree(project) => {
+                                handle_fork_worktree(terminal, app, &project)?;
+                            }
+                            HandleResult::MergeWorktree { project, branch } => {
+                                handle_merge_worktree(terminal, app, &project, &branch)?;
+                            }
+                            HandleResult::DeleteWorktree { project, branch } => {
+                                handle_delete_worktree(terminal, app, &project, &branch)?;
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// Handle fork worktree operation with input overlay
+fn handle_fork_worktree(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TreeViewApp,
+    project_name: &str,
+) -> Result<()> {
+    let project = match Project::load(project_name) {
+        Ok(p) => p,
+        Err(e) => {
+            app.status_message = Some(StatusMessage::error(format!(
+                "Failed to load project: {}",
+                e
+            )));
+            return Ok(());
+        }
+    };
+
+    // Show input overlay for branch name
+    let title = format!("New worktree for '{}'", project_name);
+    let branch_name = match show_input_overlay(terminal, app, &title, "Enter branch name...")? {
+        Some(name) if !name.is_empty() => name,
+        _ => return Ok(()), // Cancelled or empty
+    };
+
+    // Show progress
+    app.status_message = Some(StatusMessage::info(format!(
+        "Creating '{}'...",
+        branch_name
+    )));
+    terminal.draw(|frame| app.render(frame))?;
+
+    // Create the git worktree
+    let worktree_path = match git::create_worktree(&project, &branch_name) {
+        Ok(path) => path,
+        Err(e) => {
+            app.status_message = Some(StatusMessage::error(format!(
+                "Failed to create worktree: {}",
+                e
+            )));
+            return Ok(());
+        }
+    };
+
+    // Run post-create commands if configured (with streaming output dialog)
+    if let Some(mut runner) = git::start_post_create_commands(&project, &worktree_path) {
+        let title = format!("Setting up '{}'", branch_name);
+        let success = show_output_dialog(terminal, app, &title, &mut runner)?;
+
+        if !success {
+            app.status_message = Some(StatusMessage::error(
+                "Some post-create commands failed".to_string(),
+            ));
+        } else {
+            app.status_message = Some(StatusMessage::info(format!(
+                "Created worktree '{}'",
+                branch_name
+            )));
+        }
+    } else {
+        app.status_message = Some(StatusMessage::info(format!(
+            "Created worktree '{}'",
+            branch_name
+        )));
+    }
+
+    // Refresh the tree to show the new worktree
+    app.refresh(Some(project_name))?;
+
+    Ok(())
+}
+
+/// Handle merge worktree operation with confirmation
+fn handle_merge_worktree(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TreeViewApp,
+    project_name: &str,
+    branch_name: &str,
+) -> Result<()> {
+    let project = match Project::load(project_name) {
+        Ok(p) => p,
+        Err(e) => {
+            app.status_message = Some(StatusMessage::error(format!(
+                "Failed to load project: {}",
+                e
+            )));
+            return Ok(());
+        }
+    };
+
+    let default_branch = match git::get_default_branch(&project.root_expanded()) {
+        Ok(b) => b,
+        Err(e) => {
+            app.status_message = Some(StatusMessage::error(format!(
+                "Failed to get default branch: {}",
+                e
+            )));
+            return Ok(());
+        }
+    };
+
+    // Show confirmation
+    let message = format!("Merge '{}' into '{}'?", branch_name, default_branch);
+    if !show_confirm_overlay(terminal, app, &message)? {
+        return Ok(());
+    }
+
+    // Show progress
+    app.status_message = Some(StatusMessage::info(format!("Merging '{}'...", branch_name)));
+    terminal.draw(|frame| app.render(frame))?;
+
+    // Perform the merge
+    if let Err(e) = git::merge_branch_to_default(&project.root_expanded(), branch_name) {
+        app.status_message = Some(StatusMessage::error(format!("Merge failed: {}", e)));
+        return Ok(());
+    }
+
+    // Ask if user wants to delete the worktree
+    let delete_msg = format!("Delete worktree '{}' and its session?", branch_name);
+    if show_confirm_overlay(terminal, app, &delete_msg)? {
+        delete_worktree_internal(terminal, app, &project, branch_name)?;
+    } else {
+        app.status_message = Some(StatusMessage::info(format!(
+            "Merged '{}' into '{}'",
+            branch_name, default_branch
+        )));
+        app.refresh(Some(project_name))?;
+    }
+
+    Ok(())
+}
+
+/// Handle delete worktree operation with confirmation
+fn handle_delete_worktree(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TreeViewApp,
+    project_name: &str,
+    branch_name: &str,
+) -> Result<()> {
+    let project = match Project::load(project_name) {
+        Ok(p) => p,
+        Err(e) => {
+            app.status_message = Some(StatusMessage::error(format!(
+                "Failed to load project: {}",
+                e
+            )));
+            return Ok(());
+        }
+    };
+
+    // Show confirmation
+    let message = format!(
+        "Delete worktree '{}' for project '{}'?",
+        branch_name, project_name
+    );
+    if !show_confirm_overlay(terminal, app, &message)? {
+        return Ok(());
+    }
+
+    delete_worktree_internal(terminal, app, &project, branch_name)
+}
+
+/// Internal helper to delete a worktree with progress feedback
+fn delete_worktree_internal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TreeViewApp,
+    project: &Project,
+    branch_name: &str,
+) -> Result<()> {
+    let session_name = project.worktree_session_name(branch_name);
+    let current = CurrentContext::from_env();
+
+    // Check if we're deleting the current session
+    let is_current = current.is_current_worktree(&project.name, branch_name);
+
+    // Show progress
+    app.status_message = Some(StatusMessage::info(format!(
+        "Deleting '{}'...",
+        branch_name
+    )));
+    terminal.draw(|frame| app.render(frame))?;
+
+    // Kill the tmux session if running
+    if tmux::session_exists(&session_name).unwrap_or(false) {
+        if let Err(e) = tmux::safe_kill_session(&session_name) {
+            app.status_message = Some(StatusMessage::error(format!(
+                "Failed to kill session: {}",
+                e
+            )));
+            return Ok(());
+        }
+    }
+
+    // Delete the worktree
+    if let Err(e) = git::delete_worktree(project, branch_name) {
+        app.status_message = Some(StatusMessage::error(format!(
+            "Failed to delete worktree: {}",
+            e
+        )));
+        return Ok(());
+    }
+
+    // If we deleted the current session, switch to the project session on exit
+    if is_current {
+        app.switch_to_session = Some(project.name.clone());
+        app.status_message = Some(StatusMessage::info(format!(
+            "Deleted '{}'. Will switch to '{}' on exit.",
+            branch_name, project.name
+        )));
+    } else {
+        app.status_message = Some(StatusMessage::info(format!(
+            "Deleted worktree '{}'",
+            branch_name
+        )));
+    }
+
+    // Refresh the tree view
+    app.refresh(Some(&project.name))?;
+
+    Ok(())
+}
+
+/// Show an input overlay and return the entered text (None if cancelled)
+fn show_input_overlay(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TreeViewApp,
+    title: &str,
+    placeholder: &str,
+) -> Result<Option<String>> {
+    let mut value = String::new();
+
+    loop {
+        terminal.draw(|frame| {
+            // Render the tree view in the background
+            app.render(frame);
+            // Render input dialog on top
+            render_input_dialog(frame, title, placeholder, &value);
+        })?;
+
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Esc => return Ok(None),
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            return Ok(None)
+                        }
+                        KeyCode::Enter => return Ok(Some(value)),
+                        KeyCode::Backspace => {
+                            value.pop();
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            value.push(c);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Render a centered input dialog
+fn render_input_dialog(frame: &mut Frame, title: &str, placeholder: &str, value: &str) {
+    use ratatui::widgets::Clear;
+
+    let area = frame.size();
+
+    // Center the dialog
+    let dialog_width = 50.min(area.width - 4);
+    let dialog_height = 5;
+    let dialog_x = (area.width.saturating_sub(dialog_width)) / 2;
+    let dialog_y = (area.height.saturating_sub(dialog_height)) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+
+    // Clear background
+    frame.render_widget(Clear, dialog_area);
+
+    // Dialog box
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::LightMagenta))
+        .title(format!(" {} ", title))
+        .title_style(Style::default().fg(Color::LightCyan).bold());
+
+    let inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    // Input text
+    let input_area = Rect::new(inner.x + 1, inner.y + 1, inner.width - 2, 1);
+    let input_text = if value.is_empty() {
+        Line::from(vec![
+            Span::styled(placeholder, Style::default().fg(Color::DarkGray).italic()),
+            Span::styled("_", Style::default().fg(Color::LightMagenta)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(value, Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(Color::LightMagenta)),
+        ])
+    };
+    let input_widget = Paragraph::new(input_text);
+    frame.render_widget(input_widget, input_area);
+
+    // Help text
+    let help_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    let help = Paragraph::new("Enter to confirm, Esc to cancel")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(help, help_area);
+}
+
+/// Show a confirmation overlay and return true if user confirmed
+fn show_confirm_overlay(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TreeViewApp,
+    message: &str,
+) -> Result<bool> {
+    let mut selected = false; // false = No (default), true = Yes
+
+    loop {
+        terminal.draw(|frame| {
+            // Render the tree view in the background
+            app.render(frame);
+            // Render confirmation dialog on top
+            render_confirm_dialog(frame, message, selected);
+        })?;
+
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => return Ok(true),
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => return Ok(false),
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            return Ok(false)
+                        }
+                        KeyCode::Left => selected = true,
+                        KeyCode::Right => selected = false,
+                        KeyCode::Tab => selected = !selected,
+                        KeyCode::Enter => return Ok(selected),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Render a centered confirmation dialog
+fn render_confirm_dialog(frame: &mut Frame, title: &str, selected_yes: bool) {
+    use ratatui::widgets::Clear;
+
+    let area = frame.size();
+
+    // Center the dialog
+    let dialog_width = (title.len() as u16 + 8).max(30).min(area.width - 4);
+    let dialog_height = 7;
+    let dialog_x = (area.width.saturating_sub(dialog_width)) / 2;
+    let dialog_y = (area.height.saturating_sub(dialog_height)) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+
+    // Clear background
+    frame.render_widget(Clear, dialog_area);
+
+    // Dialog box
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::LightYellow))
+        .title(" Confirm ")
+        .title_style(Style::default().fg(Color::LightCyan).bold());
+
+    let inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    // Title text
+    let title_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    let title_widget = Paragraph::new(title)
+        .style(Style::default().fg(Color::White))
+        .alignment(Alignment::Center);
+    frame.render_widget(title_widget, title_area);
+
+    // Buttons
+    let buttons_area = Rect::new(inner.x, inner.y + 3, inner.width, 1);
+
+    let yes_style = if selected_yes {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightGreen)
+            .bold()
+    } else {
+        Style::default().fg(Color::LightGreen)
+    };
+
+    let no_style = if !selected_yes {
+        Style::default().fg(Color::Black).bg(Color::LightRed).bold()
+    } else {
+        Style::default().fg(Color::LightRed)
+    };
+
+    let buttons = Line::from(vec![
+        Span::raw("        "),
+        Span::styled(" Yes ", yes_style),
+        Span::raw("   "),
+        Span::styled(" No ", no_style),
+        Span::raw("        "),
+    ]);
+
+    let buttons_widget = Paragraph::new(buttons).alignment(Alignment::Center);
+    frame.render_widget(buttons_widget, buttons_area);
+
+    // Help text
+    let help_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    let help = Paragraph::new("y/n or Enter to confirm")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(help, help_area);
+}
+
+/// State for the streaming output dialog
+struct OutputDialogState {
+    lines: Vec<OutputLine>,
+    scroll: usize,
+    current_command: Option<String>,
+    finished: bool,
+    success: bool,
+}
+
+/// A line in the output dialog with optional styling
+struct OutputLine {
+    text: String,
+    style: OutputLineStyle,
+}
+
+#[derive(Clone, Copy)]
+enum OutputLineStyle {
+    Normal,
+    Command,
+    Success,
+    Error,
+}
+
+impl OutputDialogState {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            scroll: 0,
+            current_command: None,
+            finished: false,
+            success: true,
+        }
+    }
+
+    fn add_line(&mut self, text: String, style: OutputLineStyle) {
+        self.lines.push(OutputLine { text, style });
+    }
+
+    fn scroll_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(1);
+    }
+
+    fn scroll_down(&mut self, visible_lines: usize) {
+        let max_scroll = self.lines.len().saturating_sub(visible_lines);
+        self.scroll = (self.scroll + 1).min(max_scroll);
+    }
+
+    fn scroll_to_bottom(&mut self, visible_lines: usize) {
+        self.scroll = self.lines.len().saturating_sub(visible_lines);
+    }
+}
+
+/// Show a streaming output dialog for command execution
+fn show_output_dialog(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TreeViewApp,
+    title: &str,
+    runner: &mut git::CommandRunner,
+) -> Result<bool> {
+    use git::CommandOutput;
+
+    let mut state = OutputDialogState::new();
+
+    loop {
+        // Process any pending output
+        while let Some(output) = runner.try_recv() {
+            match output {
+                CommandOutput::CommandStarted(cmd) => {
+                    state.current_command = Some(cmd.clone());
+                    state.add_line(format!("$ {}", cmd), OutputLineStyle::Command);
+                }
+                CommandOutput::Line(line) => {
+                    state.add_line(line, OutputLineStyle::Normal);
+                }
+                CommandOutput::CommandFinished { success, command } => {
+                    if success {
+                        state.add_line(
+                            "Command completed successfully".to_string(),
+                            OutputLineStyle::Success,
+                        );
+                    } else {
+                        state.add_line(
+                            format!("Command failed: {}", command),
+                            OutputLineStyle::Error,
+                        );
+                        state.success = false;
+                    }
+                    state.add_line(String::new(), OutputLineStyle::Normal);
+                    state.current_command = None;
+                }
+                CommandOutput::AllDone { success } => {
+                    state.finished = true;
+                    state.success = success;
+                    if success {
+                        state.add_line(
+                            "All commands completed successfully!".to_string(),
+                            OutputLineStyle::Success,
+                        );
+                    } else {
+                        state.add_line("Some commands failed.".to_string(), OutputLineStyle::Error);
+                    }
+                }
+            }
+        }
+
+        // Calculate visible lines for auto-scroll
+        let area = terminal.size()?;
+        let dialog_height = (area.height * 3 / 4).max(10);
+        let visible_lines = (dialog_height as usize).saturating_sub(4);
+
+        // Auto-scroll to bottom when new content arrives
+        if !state.finished {
+            state.scroll_to_bottom(visible_lines);
+        }
+
+        // Render
+        terminal.draw(|frame| {
+            app.render(frame);
+            render_output_dialog(frame, title, &state);
+        })?;
+
+        // Handle input (with short poll for responsiveness)
+        if event::poll(Duration::from_millis(16))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') if state.finished => {
+                            return Ok(state.success);
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Allow Ctrl+C to exit even if not finished
+                            return Ok(state.success);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            state.scroll_up();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            state.scroll_down(visible_lines);
+                        }
+                        KeyCode::PageUp => {
+                            for _ in 0..visible_lines {
+                                state.scroll_up();
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            for _ in 0..visible_lines {
+                                state.scroll_down(visible_lines);
+                            }
+                        }
+                        KeyCode::Home => {
+                            state.scroll = 0;
+                        }
+                        KeyCode::End => {
+                            state.scroll_to_bottom(visible_lines);
+                        }
+                        KeyCode::Enter if state.finished => {
+                            return Ok(state.success);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Small delay to avoid busy-waiting when no events
+        if !runner.is_running() && state.finished {
+            // Give user a moment to see the final state
+            continue;
+        }
+    }
+}
+
+/// Render the output dialog
+fn render_output_dialog(frame: &mut Frame, title: &str, state: &OutputDialogState) {
+    use ratatui::widgets::Clear;
+
+    let area = frame.size();
+
+    // Dialog takes up most of the screen (75% width, 75% height)
+    let dialog_width = (area.width * 3 / 4).max(60).min(area.width - 4);
+    let dialog_height = (area.height * 3 / 4).max(10).min(area.height - 2);
+    let dialog_x = (area.width.saturating_sub(dialog_width)) / 2;
+    let dialog_y = (area.height.saturating_sub(dialog_height)) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+
+    // Clear background
+    frame.render_widget(Clear, dialog_area);
+
+    // Dialog box with spinner or status
+    let border_color = if state.finished {
+        if state.success {
+            Color::LightGreen
+        } else {
+            Color::LightRed
+        }
+    } else {
+        Color::LightCyan
+    };
+
+    let status_indicator = if state.finished {
+        if state.success {
+            " Done "
+        } else {
+            " Failed "
+        }
+    } else {
+        " Running... "
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .title(format!(" {} ", title))
+        .title_style(Style::default().fg(Color::LightCyan).bold())
+        .title_bottom(Line::from(status_indicator).centered())
+        .title_style(Style::default().fg(border_color));
+
+    let inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    // Calculate visible area (leave room for help text)
+    let content_height = inner.height.saturating_sub(2) as usize;
+    let content_area = Rect::new(inner.x + 1, inner.y, inner.width - 2, content_height as u16);
+
+    // Render output lines
+    let visible_lines: Vec<Line> = state
+        .lines
+        .iter()
+        .skip(state.scroll)
+        .take(content_height)
+        .map(|line| {
+            let style = match line.style {
+                OutputLineStyle::Normal => Style::default().fg(Color::White),
+                OutputLineStyle::Command => Style::default().fg(Color::LightYellow).bold(),
+                OutputLineStyle::Success => Style::default().fg(Color::LightGreen),
+                OutputLineStyle::Error => Style::default().fg(Color::LightRed),
+            };
+            Line::from(Span::styled(&line.text, style))
+        })
+        .collect();
+
+    let content = Paragraph::new(visible_lines);
+    frame.render_widget(content, content_area);
+
+    // Scroll indicator
+    if state.lines.len() > content_height {
+        let scrollbar_area =
+            Rect::new(inner.x + inner.width - 1, inner.y, 1, content_height as u16);
+
+        let total = state.lines.len();
+        let visible = content_height;
+        let scroll_pos = if total <= visible {
+            0
+        } else {
+            (state.scroll * (content_height - 1)) / (total - visible)
+        };
+
+        for y in 0..content_height {
+            let char = if y == scroll_pos { "█" } else { "░" };
+            let span = Span::styled(char, Style::default().fg(Color::DarkGray));
+            frame.render_widget(
+                Paragraph::new(span),
+                Rect::new(scrollbar_area.x, scrollbar_area.y + y as u16, 1, 1),
+            );
+        }
+    }
+
+    // Help text
+    let help_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    let help_text = if state.finished {
+        "Press Enter or Esc to close | ↑↓/jk scroll"
+    } else {
+        "Running... | ↑↓/jk scroll | Ctrl+C to cancel"
+    };
+    let help = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(help, help_area);
 }
 
 #[cfg(test)]

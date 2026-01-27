@@ -1,9 +1,137 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 use crate::config::{GlobalConfig, Project};
+
+/// Message types for streaming command output
+#[derive(Debug, Clone)]
+pub enum CommandOutput {
+    /// A line of output (stdout or stderr combined)
+    Line(String),
+    /// Command started with its description
+    CommandStarted(String),
+    /// Command completed with success/failure
+    CommandFinished { success: bool, command: String },
+    /// All commands completed
+    AllDone { success: bool },
+}
+
+/// Runs post-create commands in a background thread with streaming output
+pub struct CommandRunner {
+    receiver: Receiver<CommandOutput>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl CommandRunner {
+    /// Start running commands in a background thread
+    pub fn new(commands: Vec<String>, work_dir: PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let mut all_success = true;
+
+            for cmd_str in &commands {
+                // Notify command start
+                let _ = tx.send(CommandOutput::CommandStarted(cmd_str.clone()));
+
+                // Spawn the command with piped output
+                let mut child = match Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd_str)
+                    .current_dir(&work_dir)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                {
+                    Ok(child) => child,
+                    Err(e) => {
+                        let _ = tx.send(CommandOutput::Line(format!("Failed to start: {}", e)));
+                        let _ = tx.send(CommandOutput::CommandFinished {
+                            success: false,
+                            command: cmd_str.clone(),
+                        });
+                        all_success = false;
+                        continue;
+                    }
+                };
+
+                // Read stdout in a thread
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let tx_stdout = tx.clone();
+                let tx_stderr = tx.clone();
+
+                let stdout_handle = stdout.map(|out| {
+                    thread::spawn(move || {
+                        let reader = BufReader::new(out);
+                        for line in reader.lines().map_while(Result::ok) {
+                            let _ = tx_stdout.send(CommandOutput::Line(line));
+                        }
+                    })
+                });
+
+                let stderr_handle = stderr.map(|err| {
+                    thread::spawn(move || {
+                        let reader = BufReader::new(err);
+                        for line in reader.lines().map_while(Result::ok) {
+                            let _ = tx_stderr.send(CommandOutput::Line(line));
+                        }
+                    })
+                });
+
+                // Wait for output threads
+                if let Some(h) = stdout_handle {
+                    let _ = h.join();
+                }
+                if let Some(h) = stderr_handle {
+                    let _ = h.join();
+                }
+
+                // Wait for command to finish
+                let success = match child.wait() {
+                    Ok(status) => status.success(),
+                    Err(_) => false,
+                };
+
+                let _ = tx.send(CommandOutput::CommandFinished {
+                    success,
+                    command: cmd_str.clone(),
+                });
+
+                if !success {
+                    all_success = false;
+                }
+            }
+
+            let _ = tx.send(CommandOutput::AllDone {
+                success: all_success,
+            });
+        });
+
+        CommandRunner {
+            receiver: rx,
+            handle: Some(handle),
+        }
+    }
+
+    /// Try to receive output without blocking
+    pub fn try_recv(&self) -> Option<CommandOutput> {
+        self.receiver.try_recv().ok()
+    }
+
+    /// Check if the runner is still active
+    pub fn is_running(&self) -> bool {
+        self.handle
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false)
+    }
+}
 
 /// Create a git worktree for a project
 pub fn create_worktree(project: &Project, branch: &str) -> Result<PathBuf> {
@@ -31,7 +159,7 @@ pub fn create_worktree(project: &Project, branch: &str) -> Result<PathBuf> {
     // Check if branch exists locally or remotely
     let branch_exists = check_branch_exists(&project_root, branch)?;
 
-    // Create the worktree
+    // Create the worktree (suppress output to avoid breaking TUI)
     let mut cmd = Command::new("git");
     cmd.current_dir(&project_root);
     cmd.arg("worktree").arg("add");
@@ -44,10 +172,15 @@ pub fn create_worktree(project: &Project, branch: &str) -> Result<PathBuf> {
         cmd.arg("-b").arg(branch).arg(&worktree_path);
     }
 
-    let status = cmd.status().context("Failed to create git worktree")?;
+    let output = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to create git worktree")?;
 
-    if !status.success() {
-        anyhow::bail!("git worktree add failed");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git worktree add failed: {}", stderr.trim());
     }
 
     // Copy files if configured
@@ -75,7 +208,28 @@ pub fn create_worktree(project: &Project, branch: &str) -> Result<PathBuf> {
     Ok(worktree_path)
 }
 
-/// Run post-create commands in the worktree directory
+/// Get post-create commands for a project (if any)
+pub fn get_post_create_commands(project: &Project) -> Vec<String> {
+    project
+        .worktree
+        .as_ref()
+        .map(|w| w.post_create.clone())
+        .unwrap_or_default()
+}
+
+/// Start streaming post-create commands execution
+pub fn start_post_create_commands(
+    project: &Project,
+    worktree_path: &Path,
+) -> Option<CommandRunner> {
+    let commands = get_post_create_commands(project);
+    if commands.is_empty() {
+        return None;
+    }
+    Some(CommandRunner::new(commands, worktree_path.to_path_buf()))
+}
+
+/// Run post-create commands in the worktree directory (blocking, for non-TUI use)
 pub fn run_post_create_commands(project: &Project, worktree_path: &Path) -> Result<()> {
     if let Some(wt_config) = &project.worktree {
         for cmd_str in &wt_config.post_create {
@@ -112,15 +266,17 @@ pub fn delete_worktree(project: &Project, branch: &str) -> Result<()> {
         anyhow::bail!("Worktree does not exist at {:?}", worktree_path);
     }
 
-    // Remove the worktree
-    let status = Command::new("git")
+    // Remove the worktree (suppress output to avoid breaking TUI)
+    let output = Command::new("git")
         .current_dir(&project_root)
         .args(["worktree", "remove", "--force"])
         .arg(&worktree_path)
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .context("Failed to remove git worktree")?;
 
-    if !status.success() {
+    if !output.status.success() {
         // Try force removal of the directory
         fs::remove_dir_all(&worktree_path)
             .with_context(|| format!("Failed to remove worktree directory: {:?}", worktree_path))?;
@@ -129,6 +285,8 @@ pub fn delete_worktree(project: &Project, branch: &str) -> Result<()> {
         Command::new("git")
             .current_dir(&project_root)
             .args(["worktree", "prune"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .ok();
     }
@@ -278,26 +436,35 @@ pub fn get_default_branch(repo_path: &Path) -> Result<String> {
 pub fn merge_branch_to_default(repo_path: &Path, branch: &str) -> Result<()> {
     let default_branch = get_default_branch(repo_path)?;
 
-    // Checkout default branch
-    let status = Command::new("git")
+    // Checkout default branch (suppress output to avoid breaking TUI)
+    let output = Command::new("git")
         .current_dir(repo_path)
         .args(["checkout", &default_branch])
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .context("Failed to checkout default branch")?;
 
-    if !status.success() {
-        anyhow::bail!("Failed to checkout '{}'", default_branch);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to checkout '{}': {}", default_branch, stderr.trim());
     }
 
-    // Merge the branch
-    let status = Command::new("git")
+    // Merge the branch (suppress output to avoid breaking TUI)
+    let output = Command::new("git")
         .current_dir(repo_path)
         .args(["merge", branch])
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .context("Failed to merge branch")?;
 
-    if !status.success() {
-        anyhow::bail!("Merge failed. Please resolve conflicts manually in the main repository.");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Merge failed: {}. Please resolve conflicts manually in the main repository.",
+            stderr.trim()
+        );
     }
 
     Ok(())

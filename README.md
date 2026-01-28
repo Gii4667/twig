@@ -41,7 +41,8 @@ ln -s ~/Work/twig/target/release/twig ~/.local/bin/twig
 
 ```bash
 twig start [project]     # Start/attach to session (interactive if no arg)
-twig list                # List all projects
+twig list                # List all projects/worktrees
+twig list --focus-current # Focus current TWIG_PROJECT/TWIG_WORKTREE
 twig new [name|repo_url] # Create new project (accepts name or git URL)
 twig edit [project]      # Open config in $EDITOR
 twig delete [project]    # Delete project config
@@ -180,7 +181,7 @@ When you run `twig start <project>`:
 
 ### Worktrees
 
-When you run `twig worktree create <project> <branch>`:
+When you run `twig tree create <project> <branch>`:
 
 1. Creates git worktree at `{worktree_base}/{project}/{branch}`
 2. Creates the branch if it doesn't exist
@@ -192,10 +193,27 @@ Session naming: `myproject__feature-auth` (double underscore separator)
 
 Worktree path: `~/Work/.trees/myproject/feature-auth`
 
-When you run `twig worktree delete <project> <branch>`:
+When you run `twig tree delete <project> <branch>`:
 
 1. Kills the tmux session if running
 2. Removes the git worktree
+
+## Tmux Popup Session Picker
+
+You can replace the tmux session picker with a popup that calls `twig ls --focus-current`.
+This uses the `TWIG_PROJECT` and `TWIG_WORKTREE` environment variables to focus the cursor
+on the current project/worktree when available.
+
+Add a key binding to your `~/.tmux.conf`:
+
+```tmux
+# Twig popup
+unbind s
+bind-key s display-popup -E -w 80% -h 60% "twig ls --focus-current"
+```
+
+If you want the popup to always open from anywhere (not just inside a twig session), it
+will still work but will fall back to the first project when the env vars are not set.
 
 ## Development
 

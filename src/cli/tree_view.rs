@@ -304,12 +304,14 @@ impl<'a> TreeViewApp<'a> {
                 self.no_match = false;
             }
 
-            // Confirm search and exit search mode
+            // Confirm search and trigger selection action
             KeyCode::Enter => {
-                self.search_mode = false;
-                // Keep query visible briefly, then clear
-                self.query.clear();
-                self.no_match = false;
+                if let Some(action) = self.get_selected_action() {
+                    self.search_mode = false;
+                    self.query.clear();
+                    self.no_match = false;
+                    return Some(HandleResult::Action(action));
+                }
             }
 
             // Search input

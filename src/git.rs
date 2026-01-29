@@ -195,12 +195,20 @@ pub fn create_worktree(project: &Project, branch: &str) -> Result<PathBuf> {
                     fs::create_dir_all(parent).ok();
                 }
 
-                if src.is_dir() {
-                    copy_dir_recursive(&src, &dst)?;
-                } else {
-                    fs::copy(&src, &dst)
-                        .with_context(|| format!("Failed to copy {:?} to {:?}", src, dst))?;
+                copy_path_preserve_symlinks(&src, &dst)?;
+            }
+        }
+
+        for file in &wt_config.symlink {
+            let src = project_root.join(file);
+            let dst = worktree_path.join(file);
+
+            if src.exists() {
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent).ok();
                 }
+
+                create_symlink(&src, &dst)?;
             }
         }
     }
@@ -470,7 +478,28 @@ pub fn merge_branch_to_default(repo_path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Recursively copy a directory
+/// Copy a file or directory, preserving symlinks
+fn copy_path_preserve_symlinks(src: &Path, dst: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(src)
+        .with_context(|| format!("Failed to read metadata for {:?}", src))?;
+
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(src)
+            .with_context(|| format!("Failed to read symlink target for {:?}", src))?;
+        create_symlink(&target, dst)?;
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        copy_dir_recursive(src, dst)?;
+    } else {
+        fs::copy(src, dst).with_context(|| format!("Failed to copy {:?} to {:?}", src, dst))?;
+    }
+
+    Ok(())
+}
+
+/// Recursively copy a directory, preserving symlinks
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
 
@@ -479,12 +508,21 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
+        copy_path_preserve_symlinks(&src_path, &dst_path)?;
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    symlink(target, link)
+        .with_context(|| format!("Failed to create symlink {:?} -> {:?}", link, target))
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_target: &Path, _link: &Path) -> Result<()> {
+    anyhow::bail!("Symlink copying is only supported on Unix systems")
 }

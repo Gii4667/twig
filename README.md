@@ -115,6 +115,11 @@ worktree:
     - .env.local
     - config/master.key
 
+  # Files/folders to symlink from parent project to worktree
+  # Only supported on Unix
+  symlink:
+    - .env
+
   # Commands to run after worktree creation
   post_create:
     - bundle install
@@ -148,6 +153,8 @@ worktree:
     - .env.local
     - config/master.key
     - config/credentials.yml.enc
+  symlink:
+    - .env
   post_create:
     - bundle install
     - yarn install
@@ -185,7 +192,7 @@ When you run `twig tree create <project> <branch>`:
 
 1. Creates git worktree at `{worktree_base}/{project}/{branch}`
 2. Creates the branch if it doesn't exist
-3. Copies configured files from parent project
+3. Copies and symlinks configured files from parent project
 4. Runs post-create commands
 5. Starts a tmux session named `{project}__{branch}`
 

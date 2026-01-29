@@ -62,6 +62,8 @@ windows:
 #   copy:
 #     - .env
 #     - .env.local
+#   symlink:
+#     - .env
 #   post_create:
 #     - bundle install
 #     - yarn install
@@ -86,6 +88,8 @@ windows:
 #   copy:
 #     - .env
 #     - .env.local
+#   symlink:
+#     - .env
 #   post_create:
 #     - bundle install
 #     - yarn install

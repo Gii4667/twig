@@ -86,6 +86,10 @@ pub struct WorktreeConfig {
     #[serde(default)]
     pub copy: Vec<String>,
 
+    /// Files/folders to symlink from parent project
+    #[serde(default)]
+    pub symlink: Vec<String>,
+
     /// Commands to run after creating the worktree
     #[serde(default)]
     pub post_create: Vec<String>,

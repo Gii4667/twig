@@ -272,7 +272,7 @@ impl<'a> TreeViewApp<'a> {
                             SelectedAction::KillWorktree { project, branch }
                         }
                     };
-                    return Some(HandleResult::Action(kill_action));
+                    return Some(HandleResult::KillSession(kill_action));
                 }
             }
 
@@ -626,6 +626,8 @@ enum HandleResult {
         project: String,
         branch: String,
     },
+    /// Kill session - handled internally with confirmation modal
+    KillSession(SelectedAction),
 }
 
 /// Build tree items from project data
@@ -958,6 +960,9 @@ fn run_event_loop(
                             HandleResult::DeleteWorktree { project, branch } => {
                                 handle_delete_worktree(terminal, app, &project, &branch)?;
                             }
+                            HandleResult::KillSession(action) => {
+                                handle_kill_session(terminal, app, action)?;
+                            }
                         }
                     }
                 }
@@ -1211,6 +1216,91 @@ fn delete_worktree_internal(
 
     // Refresh the tree view
     app.refresh(Some(&project.name))?;
+
+    Ok(())
+}
+
+/// Handle kill session operation with confirmation modal
+fn handle_kill_session(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TreeViewApp,
+    action: SelectedAction,
+) -> Result<()> {
+    let (session_name, display_name, project_name) = match &action {
+        SelectedAction::KillProject(name) => (name.clone(), name.clone(), name.clone()),
+        SelectedAction::KillWorktree { project, branch } => {
+            let project_config = Project::load(project).ok();
+            let session = project_config
+                .as_ref()
+                .map(|p| p.worktree_session_name(branch))
+                .unwrap_or_else(|| format!("{}__{}", project, branch.replace('/', "-")));
+            (
+                session,
+                format!("{} / {}", project, branch),
+                project.clone(),
+            )
+        }
+        _ => return Ok(()), // Not a kill action
+    };
+
+    // Check if session is running
+    if !tmux::session_exists(&session_name).unwrap_or(false) {
+        app.status_message = Some(StatusMessage::info(format!(
+            "Session '{}' is not running",
+            display_name
+        )));
+        return Ok(());
+    }
+
+    // Show confirmation modal
+    let message = format!("Stop session '{}'?", display_name);
+    if !show_confirm_overlay(terminal, app, &message)? {
+        return Ok(()); // Cancelled - stay in tree view
+    }
+
+    let current = CurrentContext::from_env();
+    let is_current = match &action {
+        SelectedAction::KillProject(name) => current.is_current_project(name),
+        SelectedAction::KillWorktree { project, branch } => {
+            current.is_current_worktree(project, branch)
+        }
+        _ => false,
+    };
+
+    // Show progress
+    app.status_message = Some(StatusMessage::info(format!(
+        "Stopping '{}'...",
+        display_name
+    )));
+    terminal.draw(|frame| app.render(frame))?;
+
+    // Kill the session
+    if let Err(e) = tmux::safe_kill_session(&session_name) {
+        app.status_message = Some(StatusMessage::error(format!(
+            "Failed to stop session: {}",
+            e
+        )));
+        return Ok(());
+    }
+
+    // If we killed the current session, we need to handle session switching
+    if is_current {
+        // Try to switch to the project session (for worktrees) or another session
+        if let SelectedAction::KillWorktree { project, .. } = &action {
+            app.switch_to_session = Some(project.clone());
+            app.status_message = Some(StatusMessage::info(format!(
+                "Stopped '{}'. Will switch to '{}' on exit.",
+                display_name, project
+            )));
+        } else {
+            app.status_message = Some(StatusMessage::info(format!("Stopped '{}'", display_name)));
+        }
+    } else {
+        app.status_message = Some(StatusMessage::info(format!("Stopped '{}'", display_name)));
+    }
+
+    // Refresh the tree view
+    app.refresh(Some(&project_name))?;
 
     Ok(())
 }

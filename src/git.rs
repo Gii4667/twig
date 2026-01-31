@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -323,6 +324,14 @@ fn copy_path_preserve_symlinks(src: &Path, dst: &Path) -> Result<()> {
         copy_dir_recursive(src, dst)?;
     } else {
         fs::copy(src, dst).with_context(|| format!("Failed to copy {:?} to {:?}", src, dst))?;
+
+        // Ensure the file is fully synced to disk before returning
+        // This prevents race conditions where the file appears corrupted
+        // to processes that read it immediately after copying
+        let file = File::open(dst)
+            .with_context(|| format!("Failed to open copied file for sync: {:?}", dst))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to sync copied file to disk: {:?}", dst))?;
     }
 
     Ok(())

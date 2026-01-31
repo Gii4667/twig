@@ -13,6 +13,16 @@ pub fn session_exists(name: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+/// Check if a tmux session exists on a specific socket
+pub fn session_exists_with_socket(name: &str, socket_path: &str) -> Result<bool> {
+    let output = Command::new("tmux")
+        .args(["-S", socket_path, "has-session", "-t", name])
+        .output()
+        .context("Failed to check tmux session")?;
+
+    Ok(output.status.success())
+}
+
 /// Attach to an existing tmux session
 pub fn attach_session(name: &str) -> Result<()> {
     let status = Command::new("tmux")

@@ -5,4 +5,5 @@ pub mod list;
 pub mod new;
 pub mod start;
 pub mod tree_view;
+pub mod window;
 pub mod worktree;

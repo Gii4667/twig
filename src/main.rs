@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod git;
 mod tmux;
+mod tmux_control;
 mod ui;
 
 #[derive(Parser)]
@@ -74,6 +75,13 @@ enum Commands {
         #[command(subcommand)]
         action: ProjectCommands,
     },
+
+    /// Window operations
+    #[command(alias = "w")]
+    Window {
+        #[command(subcommand)]
+        action: WindowCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -120,6 +128,18 @@ enum ProjectCommands {
     SetupWindows,
 }
 
+#[derive(Subcommand)]
+enum WindowCommands {
+    /// Create a new window in an existing session
+    #[command(alias = "n")]
+    New {
+        /// Project/session name (interactive selection if not provided)
+        project: Option<String>,
+        /// Window name
+        name: Option<String>,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -138,6 +158,9 @@ fn main() -> Result<()> {
         },
         Commands::Project { action } => match action {
             ProjectCommands::SetupWindows => cli::start::setup_windows(),
+        },
+        Commands::Window { action } => match action {
+            WindowCommands::New { project, name } => cli::window::new(project, name),
         },
     }
 }

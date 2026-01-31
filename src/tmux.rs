@@ -176,17 +176,25 @@ impl SessionBuilder {
         let root_expanded = shellexpand::tilde(&self.root).to_string();
 
         // Create the session with a temporary setup window
-        Command::new("tmux")
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                &self.session_name,
-                "-n",
-                "setup",
-                "-c",
-                &root_expanded,
-            ])
+        let mut new_session_cmd = Command::new("tmux");
+        new_session_cmd.args([
+            "new-session",
+            "-d",
+            "-s",
+            &self.session_name,
+            "-n",
+            "setup",
+            "-c",
+            &root_expanded,
+            "-e",
+            &format!("TWIG_PROJECT={}", self.project_name),
+        ]);
+
+        if let Some(branch) = &self.worktree_branch {
+            new_session_cmd.args(["-e", &format!("TWIG_WORKTREE={}", branch)]);
+        }
+
+        new_session_cmd
             .status()
             .context("Failed to create tmux session")?;
 

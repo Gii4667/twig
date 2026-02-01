@@ -62,6 +62,29 @@ enum Commands {
         session: Option<String>,
     },
 
+    /// Run a command in a tmux session
+    #[command(alias = "r")]
+    Run {
+        /// Command to run
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+        /// Project/session name (defaults to TWIG_PROJECT when set)
+        #[arg(long)]
+        project: Option<String>,
+        /// Worktree branch name (defaults to TWIG_WORKTREE when set)
+        #[arg(long)]
+        tree: Option<String>,
+        /// Window index or name (defaults to current window if available)
+        #[arg(long)]
+        window: Option<String>,
+        /// Target pane index or id
+        #[arg(long)]
+        pane: Option<String>,
+        /// Tmux socket path to target
+        #[arg(long)]
+        socket: Option<String>,
+    },
+
     /// Git worktree operations
     #[command(alias = "t")]
     Tree {
@@ -142,37 +165,6 @@ enum WindowCommands {
         socket: Option<String>,
     },
 
-    /// Create a new window and run a command in it
-    #[command(alias = "nr")]
-    NewRun {
-        /// Project/session name (interactive selection if not provided)
-        project: Option<String>,
-        /// Window name
-        name: Option<String>,
-        /// Command to run
-        #[arg(trailing_var_arg = true)]
-        command: Vec<String>,
-        /// Tmux socket path to target
-        #[arg(long)]
-        socket: Option<String>,
-    },
-
-    /// Run a command in a new pane for a window
-    #[command(alias = "r")]
-    Run {
-        /// Window index or name
-        window: String,
-        /// Command to run
-        #[arg(trailing_var_arg = true)]
-        command: Vec<String>,
-        /// Project/session name (defaults to current tmux session if available)
-        #[arg(long)]
-        project: Option<String>,
-        /// Tmux socket path to target
-        #[arg(long)]
-        socket: Option<String>,
-    },
-
     /// List panes for a window
     #[command(alias = "lp")]
     ListPanes {
@@ -200,6 +192,14 @@ fn main() -> Result<()> {
         Commands::Edit { project } => cli::edit::run(project),
         Commands::Delete { project } => cli::delete::run(project),
         Commands::Stop { session } => cli::kill::run(session),
+        Commands::Run {
+            command,
+            project,
+            tree,
+            window,
+            pane,
+            socket,
+        } => cli::window::run(project, tree, window, command, pane, socket),
         Commands::Tree { action } => match action {
             TreeCommands::Create { project, branch } => cli::worktree::create(project, branch),
             TreeCommands::List { project } => cli::worktree::list(project),
@@ -215,18 +215,6 @@ fn main() -> Result<()> {
                 name,
                 socket,
             } => cli::window::new(project, name, socket),
-            WindowCommands::NewRun {
-                project,
-                name,
-                command,
-                socket,
-            } => cli::window::new_run(project, name, command, socket),
-            WindowCommands::Run {
-                window,
-                command,
-                project,
-                socket,
-            } => cli::window::run(project, window, command, socket),
             WindowCommands::ListPanes {
                 window,
                 project,

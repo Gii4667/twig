@@ -74,6 +74,24 @@ pub fn current_session_name() -> Option<String> {
     }
 }
 
+/// Get the current tmux window name (if inside tmux)
+pub fn current_window_name() -> Option<String> {
+    if !inside_tmux() {
+        return None;
+    }
+
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "#{window_name}"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
 /// Get the current tmux session name for a specific socket
 pub fn current_session_name_with_socket(socket_path: &str) -> Option<String> {
     let output = Command::new("tmux")
@@ -84,6 +102,20 @@ pub fn current_session_name_with_socket(socket_path: &str) -> Option<String> {
             "-p",
             "#{session_name}",
         ])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Get the current tmux window name for a specific socket
+pub fn current_window_name_with_socket(socket_path: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["-S", socket_path, "display-message", "-p", "#{window_name}"])
         .output()
         .ok()?;
 

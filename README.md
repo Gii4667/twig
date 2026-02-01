@@ -51,6 +51,12 @@ twig stop [project]      # Kill tmux session
 # Debug tmux control-mode I/O
 TWIG_TMUX_DEBUG=1 twig window new [project] [name]
 
+# Run a command in a window/pane
+twig run --project=dotfiles --window=6 --pane=1 -- whoami
+
+# Run a command in a worktree session
+twig run --project=dotfiles --tree=feature-x --window=1 -- btop
+
 # Worktree commands
 twig tree create [project] [branch]   # Create worktree + session
 twig tree list [project]              # List worktrees

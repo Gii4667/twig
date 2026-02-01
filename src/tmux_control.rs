@@ -270,6 +270,15 @@ impl ControlClient {
         );
         self.command_with_output(&command)
     }
+
+    pub fn list_windows(&mut self, target: &str) -> Result<Vec<String>> {
+        let command = format!(
+            "list-windows -t {} -F {}",
+            quote_tmux_arg(target),
+            quote_tmux_arg("#{window_name}")
+        );
+        self.command_with_output(&command)
+    }
 }
 
 fn quote_tmux_arg(value: &str) -> String {

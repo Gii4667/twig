@@ -12,6 +12,10 @@ seconds.
 
 https://github.com/user-attachments/assets/95e21d30-a055-4c1b-b0b6-dcccb61dd53e
 
+Need to review a teammate's PR? In the tree view (`twig tree list`), enter `#123` as the branch
+name and twig will use `gh` to fetch the PR head (including forks), create a local `pr-123`
+branch, and spin up a worktree. Requires GitHub CLI (`gh`) authentication.
+
 
 ## Requirements
 

